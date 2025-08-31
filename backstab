@@ -1,13 +1,21 @@
+--[[  
+Paste into command bar in Play Solo OR use loadstring() in a LocalScript  
+Make sure killers exist in Workspace with the right names  
+--]]
+
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
 
-local player = Players.LocalPlayer
+local player = Players.LocalPlayer or Players:GetPlayers()[1] -- fallback for command bar
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
 local killers = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
+
+local holdingT = false
+local activeTween
 
 local function getKiller()
 	for _, name in ipairs(killers) do
@@ -19,16 +27,10 @@ local function getKiller()
 	return nil
 end
 
-local holdingT = false
-local activeTween
-
 local function tweenBehindKiller(killer)
 	if not killer then return end
 	local killerHRP = killer:FindFirstChild("HumanoidRootPart")
-	if not killerHRP then 
-		warn("Killer found but has no HumanoidRootPart")
-		return 
-	end
+	if not killerHRP then return end
 
 	local offset = -killerHRP.CFrame.LookVector * 5
 	local targetPosition = killerHRP.Position + offset
@@ -39,33 +41,31 @@ local function tweenBehindKiller(killer)
 	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 	activeTween = TweenService:Create(humanoidRootPart, tweenInfo, {CFrame = targetCFrame})
 	activeTween:Play()
-
-	print("Tweening behind:", killer.Name)
 end
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if gameProcessed then return end
+-- Input handlers
+UserInputService.InputBegan:Connect(function(input, gp)
+	if gp then return end
 	if input.KeyCode == Enum.KeyCode.T then
 		holdingT = true
-		print("Holding T")
 	end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
 	if input.KeyCode == Enum.KeyCode.T then
 		holdingT = false
-		print("Released T")
 		if activeTween then activeTween:Cancel() end
 	end
 end)
 
+-- Update loop
 RunService.RenderStepped:Connect(function()
 	if holdingT then
 		local killer = getKiller()
 		if killer then
 			tweenBehindKiller(killer)
-		else
-			print("No killer found in workspace")
 		end
 	end
 end)
+
+print("✅ Killer-dash script injected!")
