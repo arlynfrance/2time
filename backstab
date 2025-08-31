@@ -1,26 +1,42 @@
--- Killer list
-local killerNames = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
-
 -- Services
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
+-- Player
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local hrp = character:WaitForChild("HumanoidRootPart")
 
-local holdingT = false
-local MAX_DISTANCE = 8 -- Only follow if killer is within 8 studs
+-- Settings
+local killerNames = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
+local MAX_DISTANCE = 8
+local OFFSET_BEHIND = 3 -- studs behind
+local SMOOTHNESS = 0.15 -- 0-1, higher is faster
 
--- Function to find nearest killer within distance
+-- State
+local enabled = false
+local mode = "Behind" -- "Behind" or "Around"
+local matchFacing = true -- optional facing alignment
+
+-- Key toggle (T)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.T then
+        enabled = not enabled
+    end
+end)
+
+-- Helper: Find nearest killer within distance
 local function getNearestKiller()
     local nearest = nil
     local nearestDistance = math.huge
 
     for _, p in pairs(Players:GetPlayers()) do
         if table.find(killerNames, p.Name) and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-            local dist = (p.Character.HumanoidRootPart.Position - hrp.Position).Magnitude
+            local targetHRP = p.Character.HumanoidRootPart
+            local dist = (targetHRP.Position - hrp.Position).Magnitude
             if dist < nearestDistance and dist <= MAX_DISTANCE then
                 nearestDistance = dist
                 nearest = p.Character
@@ -31,32 +47,30 @@ local function getNearestKiller()
     return nearest
 end
 
--- Continuous lerp behind killer while facing them
-RunService.RenderStepped:Connect(function(deltaTime)
-    if holdingT then
-        local target = getNearestKiller()
-        if target and target:FindFirstChild("HumanoidRootPart") then
-            local targetHRP = target.HumanoidRootPart
-            local offset = targetHRP.CFrame.LookVector * -3 -- 3 studs behind
-            local desiredPosition = targetHRP.Position + offset
-            local lookAt = targetHRP.Position -- face the killer
-
-            local desiredCFrame = CFrame.new(desiredPosition, lookAt)
-            hrp.CFrame = hrp.CFrame:Lerp(desiredCFrame, 0.1) -- smooth lerp
-        end
+-- Helper: Compute target position
+local function getTargetPosition(targetHRP)
+    if mode == "Behind" then
+        return targetHRP.Position - (targetHRP.CFrame.LookVector * OFFSET_BEHIND)
+    elseif mode == "Around" then
+        local rightVec = targetHRP.CFrame.RightVector
+        return targetHRP.Position + rightVec * OFFSET_BEHIND
     end
-end)
+    return targetHRP.Position
+end
 
--- Key press listeners
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.KeyCode == Enum.KeyCode.T then
-        holdingT = true
-    end
-end)
+-- Main update loop
+RunService.RenderStepped:Connect(function()
+    if not enabled then return end
 
-UserInputService.InputEnded:Connect(function(input)
-    if input.KeyCode == Enum.KeyCode.T then
-        holdingT = false
-    end
+    local target = getNearestKiller()
+    if not target then return end
+    local targetHRP = target:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then return end
+
+    -- Compute desired position
+    local targetPos = getTargetPosition(targetHRP)
+    local lookAt = matchFacing and targetHRP.Position or targetPos + (targetHRP.Position - targetPos).Unit
+
+    -- Smooth lerp
+    hrp.CFrame = hrp.CFrame:Lerp(CFrame.new(targetPos, lookAt), SMOOTHNESS)
 end)
