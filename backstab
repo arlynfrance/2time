@@ -9,7 +9,6 @@ local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
 local killers = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
 
--- Find the first killer in workspace
 local function getKiller()
 	for _, name in ipairs(killers) do
 		local killer = workspace:FindFirstChild(name)
@@ -23,53 +22,50 @@ end
 local holdingT = false
 local activeTween
 
--- Tween behind killer
 local function tweenBehindKiller(killer)
-	if not killer or not killer:FindFirstChild("HumanoidRootPart") then return end
-	
-	local killerHRP = killer.HumanoidRootPart
+	if not killer then return end
+	local killerHRP = killer:FindFirstChild("HumanoidRootPart")
+	if not killerHRP then 
+		warn("Killer found but has no HumanoidRootPart")
+		return 
+	end
 
-	-- 5 studs behind
 	local offset = -killerHRP.CFrame.LookVector * 5
 	local targetPosition = killerHRP.Position + offset
-
-	-- Face same way as killer
 	local targetCFrame = CFrame.new(targetPosition, targetPosition + killerHRP.CFrame.LookVector)
 
-	-- Kill any active tween so it doesn’t fight
-	if activeTween then
-		activeTween:Cancel()
-	end
+	if activeTween then activeTween:Cancel() end
 
 	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 	activeTween = TweenService:Create(humanoidRootPart, tweenInfo, {CFrame = targetCFrame})
 	activeTween:Play()
+
+	print("Tweening behind:", killer.Name)
 end
 
--- Hold T
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 	if input.KeyCode == Enum.KeyCode.T then
 		holdingT = true
+		print("Holding T")
 	end
 end)
 
--- Release T
 UserInputService.InputEnded:Connect(function(input)
 	if input.KeyCode == Enum.KeyCode.T then
 		holdingT = false
-		if activeTween then
-			activeTween:Cancel()
-		end
+		print("Released T")
+		if activeTween then activeTween:Cancel() end
 	end
 end)
 
--- Update while holding T
 RunService.RenderStepped:Connect(function()
 	if holdingT then
 		local killer = getKiller()
 		if killer then
 			tweenBehindKiller(killer)
+		else
+			print("No killer found in workspace")
 		end
 	end
 end)
