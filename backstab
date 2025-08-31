@@ -1,6 +1,6 @@
 --[[  
-Paste into command bar in Play Solo OR use loadstring() in a LocalScript  
-Make sure killers exist in Workspace with the right names  
+Paste this into the command bar in Play mode OR inject with loadstring() in a LocalScript.
+It makes you tween behind the *closest* killer while holding T.
 --]]
 
 local UserInputService = game:GetService("UserInputService")
@@ -12,30 +12,43 @@ local player = Players.LocalPlayer or Players:GetPlayers()[1] -- fallback for co
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
+-- List of killer names
 local killers = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
 
 local holdingT = false
 local activeTween
 
-local function getKiller()
+-- Find the *closest* killer with a HumanoidRootPart
+local function getClosestKiller()
+	local closest, shortestDist
 	for _, name in ipairs(killers) do
 		local killer = workspace:FindFirstChild(name)
 		if killer and killer:FindFirstChild("HumanoidRootPart") then
-			return killer
+			local killerHRP = killer.HumanoidRootPart
+			local dist = (killerHRP.Position - humanoidRootPart.Position).Magnitude
+			if not shortestDist or dist < shortestDist then
+				shortestDist = dist
+				closest = killer
+			end
 		end
 	end
-	return nil
+	return closest
 end
 
+-- Tween behind killer
 local function tweenBehindKiller(killer)
 	if not killer then return end
 	local killerHRP = killer:FindFirstChild("HumanoidRootPart")
 	if not killerHRP then return end
 
+	-- 5 studs behind killer
 	local offset = -killerHRP.CFrame.LookVector * 5
 	local targetPosition = killerHRP.Position + offset
+
+	-- Face same way as killer
 	local targetCFrame = CFrame.new(targetPosition, targetPosition + killerHRP.CFrame.LookVector)
 
+	-- Cancel any previous tween
 	if activeTween then activeTween:Cancel() end
 
 	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
@@ -61,11 +74,11 @@ end)
 -- Update loop
 RunService.RenderStepped:Connect(function()
 	if holdingT then
-		local killer = getKiller()
+		local killer = getClosestKiller()
 		if killer then
 			tweenBehindKiller(killer)
 		end
 	end
 end)
 
-print("✅ Killer-dash script injected!")
+print("✅ Closest-killer dash script injected!")
