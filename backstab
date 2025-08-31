@@ -1,0 +1,75 @@
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+local killers = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
+
+-- Find the first killer in workspace
+local function getKiller()
+	for _, name in ipairs(killers) do
+		local killer = workspace:FindFirstChild(name)
+		if killer and killer:FindFirstChild("HumanoidRootPart") then
+			return killer
+		end
+	end
+	return nil
+end
+
+local holdingT = false
+local activeTween
+
+-- Tween behind killer
+local function tweenBehindKiller(killer)
+	if not killer or not killer:FindFirstChild("HumanoidRootPart") then return end
+	
+	local killerHRP = killer.HumanoidRootPart
+
+	-- 5 studs behind
+	local offset = -killerHRP.CFrame.LookVector * 5
+	local targetPosition = killerHRP.Position + offset
+
+	-- Face same way as killer
+	local targetCFrame = CFrame.new(targetPosition, targetPosition + killerHRP.CFrame.LookVector)
+
+	-- Kill any active tween so it doesn’t fight
+	if activeTween then
+		activeTween:Cancel()
+	end
+
+	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+	activeTween = TweenService:Create(humanoidRootPart, tweenInfo, {CFrame = targetCFrame})
+	activeTween:Play()
+end
+
+-- Hold T
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode == Enum.KeyCode.T then
+		holdingT = true
+	end
+end)
+
+-- Release T
+UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.T then
+		holdingT = false
+		if activeTween then
+			activeTween:Cancel()
+		end
+	end
+end)
+
+-- Update while holding T
+RunService.RenderStepped:Connect(function()
+	if holdingT then
+		local killer = getKiller()
+		if killer then
+			tweenBehindKiller(killer)
+		end
+	end
+end)
