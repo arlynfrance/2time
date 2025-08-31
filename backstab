@@ -1,84 +1,62 @@
---[[  
-Paste this into the command bar in Play mode OR inject with loadstring() in a LocalScript.
-It makes you tween behind the *closest* killer while holding T.
---]]
+-- Killer list
+local killerNames = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
 
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
-local RunService = game:GetService("RunService")
+-- Services
 local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 
-local player = Players.LocalPlayer or Players:GetPlayers()[1] -- fallback for command bar
+local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
-local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
-
--- List of killer names
-local killers = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
+local hrp = character:WaitForChild("HumanoidRootPart")
 
 local holdingT = false
-local activeTween
+local MAX_DISTANCE = 8 -- Only follow if killer is within 8 studs
 
--- Find the *closest* killer with a HumanoidRootPart
-local function getClosestKiller()
-	local closest, shortestDist
-	for _, name in ipairs(killers) do
-		local killer = workspace:FindFirstChild(name)
-		if killer and killer:FindFirstChild("HumanoidRootPart") then
-			local killerHRP = killer.HumanoidRootPart
-			local dist = (killerHRP.Position - humanoidRootPart.Position).Magnitude
-			if not shortestDist or dist < shortestDist then
-				shortestDist = dist
-				closest = killer
-			end
-		end
-	end
-	return closest
+-- Function to find nearest killer within distance
+local function getNearestKiller()
+    local nearest = nil
+    local nearestDistance = math.huge
+
+    for _, p in pairs(Players:GetPlayers()) do
+        if table.find(killerNames, p.Name) and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+            local dist = (p.Character.HumanoidRootPart.Position - hrp.Position).Magnitude
+            if dist < nearestDistance and dist <= MAX_DISTANCE then
+                nearestDistance = dist
+                nearest = p.Character
+            end
+        end
+    end
+
+    return nearest
 end
 
--- Tween behind killer
-local function tweenBehindKiller(killer)
-	if not killer then return end
-	local killerHRP = killer:FindFirstChild("HumanoidRootPart")
-	if not killerHRP then return end
+-- Continuous lerp behind killer while facing them
+RunService.RenderStepped:Connect(function(deltaTime)
+    if holdingT then
+        local target = getNearestKiller()
+        if target and target:FindFirstChild("HumanoidRootPart") then
+            local targetHRP = target.HumanoidRootPart
+            local offset = targetHRP.CFrame.LookVector * -3 -- 3 studs behind
+            local desiredPosition = targetHRP.Position + offset
+            local lookAt = targetHRP.Position -- face the killer
 
-	-- 5 studs behind killer
-	local offset = -killerHRP.CFrame.LookVector * 5
-	local targetPosition = killerHRP.Position + offset
+            local desiredCFrame = CFrame.new(desiredPosition, lookAt)
+            hrp.CFrame = hrp.CFrame:Lerp(desiredCFrame, 0.1) -- smooth lerp
+        end
+    end
+end)
 
-	-- Face same way as killer
-	local targetCFrame = CFrame.new(targetPosition, targetPosition + killerHRP.CFrame.LookVector)
-
-	-- Cancel any previous tween
-	if activeTween then activeTween:Cancel() end
-
-	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
-	activeTween = TweenService:Create(humanoidRootPart, tweenInfo, {CFrame = targetCFrame})
-	activeTween:Play()
-end
-
--- Input handlers
-UserInputService.InputBegan:Connect(function(input, gp)
-	if gp then return end
-	if input.KeyCode == Enum.KeyCode.T then
-		holdingT = true
-	end
+-- Key press listeners
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.T then
+        holdingT = true
+    end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
-	if input.KeyCode == Enum.KeyCode.T then
-		holdingT = false
-		if activeTween then activeTween:Cancel() end
-	end
+    if input.KeyCode == Enum.KeyCode.T then
+        holdingT = false
+    end
 end)
-
--- Update loop
-RunService.RenderStepped:Connect(function()
-	if holdingT then
-		local killer = getClosestKiller()
-		if killer then
-			tweenBehindKiller(killer)
-		end
-	end
-end)
-
-print("✅ Closest-killer dash script injected!")
