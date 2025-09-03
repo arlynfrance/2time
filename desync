@@ -12,7 +12,7 @@ local EVENT_NAME = "ServerPosVisualizerEvent"
 local UPDATE_RATE = 0.12
 local SMOOTHING = true
 local LERP_ALPHA = 0.45
-local GHOST_TRANSPARENCY = 0.8 -- pretty transparent
+local GHOST_TRANSPARENCY = 0.7 -- pretty transparent
 
 -- Ensure RemoteEvent exists
 local remote = ReplicatedStorage:FindFirstChild(EVENT_NAME)
