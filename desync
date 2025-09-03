@@ -1,142 +1,85 @@
--- ClientGhostVisualizer.lua  (StarterPlayerScripts)
+-- Desync Ghost Visualizer with Ping (client-only, loadstring safe)
+-- Shows where the server thinks you are, with studs distance + ping
+
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local Stats = game:GetService("Stats")
 local player = Players.LocalPlayer
-local EVENT_NAME = "ServerPosVisualizerEvent"
+local char = player.Character or player.CharacterAdded:Wait()
+local hrp = char:WaitForChild("HumanoidRootPart")
 
--- Clean up previous ghosts from workspace (prevents duplicates)
-for _,obj in ipairs(workspace:GetChildren()) do
-    if obj.Name == player.Name.."_ServerGhost" then
-        pcall(function() obj:Destroy() end)
-    end
+-- Clean up old ghost if any
+local existing = workspace:FindFirstChild(player.Name .. "_ServerGhost")
+if existing then existing:Destroy() end
+
+-- Clone ghost
+local ghost = char:Clone()
+ghost.Name = player.Name .. "_ServerGhost"
+ghost.Parent = workspace
+for _, d in ipairs(ghost:GetDescendants()) do
+	if d:IsA("Script") or d:IsA("LocalScript") then
+		d:Destroy()
+	elseif d:IsA("BasePart") then
+		d.CanCollide = false
+		d.CastShadow = false
+		d.Transparency = 0.8 -- make ghost pretty transparent
+	end
+end
+ghost.PrimaryPart = ghost:FindFirstChild("HumanoidRootPart")
+
+-- Billboard
+local billboard = Instance.new("BillboardGui")
+billboard.Adornee = ghost.PrimaryPart
+billboard.Size = UDim2.new(0,200,0,70)
+billboard.StudsOffset = Vector3.new(0,4,0)
+billboard.AlwaysOnTop = true
+
+-- Distance text
+local distText = Instance.new("TextLabel")
+distText.Size = UDim2.new(1,0,0.5,0)
+distText.BackgroundTransparency = 1
+distText.TextColor3 = Color3.new(1,1,1)
+distText.TextStrokeTransparency = 0.2
+distText.TextScaled = true
+distText.Font = Enum.Font.SourceSansBold
+distText.Text = "..."
+distText.Parent = billboard
+
+-- Ping text (slightly transparent)
+local pingText = Instance.new("TextLabel")
+pingText.Position = UDim2.new(0,0,0.5,0)
+pingText.Size = UDim2.new(1,0,0.5,0)
+pingText.BackgroundTransparency = 1
+pingText.TextColor3 = Color3.new(1,1,1)
+pingText.TextTransparency = 0.25
+pingText.TextStrokeTransparency = 0.4
+pingText.TextScaled = true
+pingText.Font = Enum.Font.SourceSans
+pingText.Text = "Ping: ..."
+pingText.Parent = billboard
+
+billboard.Parent = ghost.PrimaryPart
+
+-- Helper: get ping
+local function getPing()
+	local pingStat = Stats.Network.ServerStatsItem["Data Ping"]
+	if pingStat then
+		return math.floor(pingStat:GetValue())
+	end
+	return 0
 end
 
-local remote = ReplicatedStorage:FindFirstChild(EVENT_NAME)
+-- Update loop
+RunService.Heartbeat:Connect(function()
+	if ghost and ghost.PrimaryPart then
+		-- Place ghost exactly at replicated HRP (server sees this)
+		ghost:SetPrimaryPartCFrame(hrp.CFrame)
 
-local ghost = nil
-local labelText = nil
+		-- Stud distance
+		local dist = (char.HumanoidRootPart.Position - ghost.PrimaryPart.Position).Magnitude
+		distText.Text = string.format("%.1f studs", dist)
 
-local function createBillboard(part)
-    -- remove existing billboard on that part
-    local existing = part:FindFirstChild("ServerGhostDistanceBillboard")
-    if existing then existing:Destroy() end
-
-    local billboard = Instance.new("BillboardGui")
-    billboard.Name = "ServerGhostDistanceBillboard"
-    billboard.Adornee = part
-    billboard.Size = UDim2.new(0, 220, 0, 60)
-    billboard.StudsOffset = Vector3.new(0, 3, 0)
-    billboard.AlwaysOnTop = true
-
-    local txt = Instance.new("TextLabel")
-    txt.Name = "GhostDistanceText"
-    txt.Size = UDim2.new(1, 0, 1, 0)
-    txt.BackgroundTransparency = 1
-    txt.TextColor3 = Color3.new(1,1,1)
-    txt.TextStrokeTransparency = 0.25
-    txt.TextScaled = true
-    txt.Font = Enum.Font.SourceSansBold
-    txt.Text = "0.0 studs\n(0.0, 0.0, 0.0)"
-    txt.Parent = billboard
-    billboard.Parent = part
-    return txt
-end
-
-local function makeGhostFromCharacter(char)
-    if ghost then
-        pcall(function() ghost:Destroy() end)
-        ghost = nil
-        labelText = nil
-    end
-    if not char then return end
-
-    local clone = char:Clone()
-    clone.Name = player.Name .. "_ServerGhost"
-    clone.Parent = workspace
-
-    -- strip scripts and make ghost visually transparent & non-colliding
-    for _,desc in ipairs(clone:GetDescendants()) do
-        if desc:IsA("Script") or desc:IsA("LocalScript") then
-            pcall(function() desc:Destroy() end)
-        elseif desc:IsA("BasePart") then
-            desc.CanCollide = false
-            desc.CastShadow = false
-            desc.Transparency = 0.8
-        elseif desc:IsA("Humanoid") then
-            desc.PlatformStand = true
-            desc.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-        end
-    end
-
-    -- ensure primary part
-    if not clone.PrimaryPart then
-        clone.PrimaryPart = clone:FindFirstChild("HumanoidRootPart") or clone:FindFirstChildWhichIsA("BasePart")
-    end
-
-    ghost = clone
-    if ghost and ghost.PrimaryPart then
-        labelText = createBillboard(ghost.PrimaryPart)
-    end
-end
-
-player.CharacterAdded:Connect(function(char)
-    -- slight wait to ensure character parts exist
-    task.wait(0.08)
-    makeGhostFromCharacter(char)
+		-- Ping in ms
+		pingText.Text = "Ping: " .. tostring(getPing()) .. " ms"
+	end
 end)
-
-if player.Character then
-    makeGhostFromCharacter(player.Character)
-end
-
--- If the server remote exists, use it for exact server positions.
--- Otherwise fallback to a delayed-buffer simulated "server" (for local loadstring/testing).
-if remote then
-    remote.OnClientEvent:Connect(function(serverCFrame)
-        if not ghost or not ghost.PrimaryPart then return end
-        -- place ghost exactly where the server thinks you are
-        pcall(function() ghost:SetPrimaryPartCFrame(serverCFrame) end)
-
-        -- update distance + coords
-        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-        if hrp and labelText then
-            local dist = (hrp.Position - serverCFrame.Position).Magnitude
-            labelText.Text = string.format("%.1f studs\n(%.1f, %.1f, %.1f)",
-                dist,
-                serverCFrame.Position.X,
-                serverCFrame.Position.Y,
-                serverCFrame.Position.Z
-            )
-        end
-    end)
-else
-    -- fallback: short delay buffer to simulate a server position lag (development-only)
-    local buffer = {}
-    local delaySeconds = 0.22
-
-    RunService.Heartbeat:Connect(function()
-        local char = player.Character
-        if not char then return end
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
-
-        table.insert(buffer, {t = tick(), cf = hrp.CFrame})
-
-        while #buffer > 0 and tick() - buffer[1].t >= delaySeconds do
-            local packet = table.remove(buffer, 1)
-            if ghost and ghost.PrimaryPart then
-                pcall(function() ghost:SetPrimaryPartCFrame(packet.cf) end)
-                if labelText then
-                    local dist = (hrp.Position - packet.cf.Position).Magnitude
-                    labelText.Text = string.format("%.1f studs\n(%.1f, %.1f, %.1f)",
-                        dist,
-                        packet.cf.Position.X,
-                        packet.cf.Position.Y,
-                        packet.cf.Position.Z
-                    )
-                end
-            end
-        end
-    end)
-end
