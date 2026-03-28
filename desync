@@ -1,1064 +1,463 @@
--- ===== AutoBackstab v4 =====
--- ===== GlideStab + GlideStab Assist (Techs) =====
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local lp = Players.LocalPlayer
 
--- CHANGELOG v4 (improvements over v3):
--- [COMPAT]  AssemblyLinearVelocity used everywhere; no deprecated .Velocity calls
--- [COMPAT]  task.* replaces all wait()/spawn()/delay() (fully Luau task scheduler)
--- [COMPAT]  Animation track validity checks before GetPlayingAnimationTracks
--- [COMPAT]  Character access via LocalPlayer.Character with CharacterAdded safety
--- [ROBUST]  All service:GetService calls cached at top; no repeated calls in loops
--- [ROBUST]  killerTrack keyed by killer model (not khrp) to survive part refreshes
--- [ROBUST]  Cooldown managed with a single unified table per feature
--- [ROBUST]  All pcall'd external calls now log warn() on failure in debug builds
--- [PERF]    Heartbeat tracker skips invalidated models early
--- [PERF]    Main watcher breaks early once a trigger fires per cycle
--- [PERF]    GlideStab assist only spawns once per animation edge (rising edge only)
--- [UX]      Range input validated and clamped (prevents NaN / negative ranges)
--- [UX]      Backstab type "lerp" smoothed with exponential decay vs fixed step
--- [FIX]     Aiming ref-count was not decremented on early returns; now always cleaned up
--- [FIX]     GlideStab Legit mode now correctly bails when player leaves beside range
--- [FIX]     tryActivateButton safe against missing MouseButton1Click event
--- [FIX]     SaveManager / ThemeManager loading isolated so either can fail independently
+-- GUI Setup
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "BackstabToggleGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = lp:WaitForChild("PlayerGui")
 
--- ==================== Services ====================
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
-local TweenService     = game:GetService("TweenService")
-local Workspace        = game:GetService("Workspace")
-local ReplicatedStorage= game:GetService("ReplicatedStorage")
-local StarterGui       = game:GetService("StarterGui")
+-- Toggle Button
+local toggleButton = Instance.new("TextButton")
+toggleButton.Size = UDim2.new(0, 150, 0, 40)
+toggleButton.Position = UDim2.new(0, 10, 0, 10)
+toggleButton.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.Font = Enum.Font.SourceSansBold
+toggleButton.TextSize = 20
+toggleButton.Text = "Backstab: OFF"
+toggleButton.Parent = screenGui
 
-local LocalPlayer = Players.LocalPlayer
+-- Range Label
+local rangeLabel = Instance.new("TextLabel")
+rangeLabel.Size = UDim2.new(0, 150, 0, 20)
+rangeLabel.Position = UDim2.new(0, 10, 0, 55)
+rangeLabel.BackgroundTransparency = 1
+rangeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+rangeLabel.Font = Enum.Font.SourceSans
+rangeLabel.TextSize = 16
+rangeLabel.Text = "Range:"
+rangeLabel.Parent = screenGui
 
--- ==================== Character helpers ====================
-local function getCharacter()
-    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-end
+-- TextBox for Range Input
+local rangeBox = Instance.new("TextBox")
+rangeBox.Size = UDim2.new(0, 150, 0, 25)
+rangeBox.Position = UDim2.new(0, 10, 0, 75)
+rangeBox.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+rangeBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+rangeBox.Font = Enum.Font.SourceSans
+rangeBox.TextSize = 16
+rangeBox.PlaceholderText = "Enter range (number)"
+rangeBox.Text = "4"
+rangeBox.ClearTextOnFocus = false
+rangeBox.Parent = screenGui
 
-local function getHRP(char)
-    char = char or getCharacter()
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
+-- Vars
+local enabled = false
+local cooldown = false
+local lastTarget = nil
+local range = 4
+local daggerRemote = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Network"):WaitForChild("RemoteEvent")
+local killerNames = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
+local killersFolder = workspace:WaitForChild("Players"):WaitForChild("Killers")
 
-local function getHumanoid(char)
-    char = char or getCharacter()
-    return char and char:FindFirstChildWhichIsA("Humanoid")
-end
-
--- ==================== CONFIG ====================
-local CFG = {
-    -- backstab
-    DEFAULT_PROXIMITY    = 8,
-    DEFAULT_DURATION     = 0.7,
-    BEHIND_DISTANCE      = 1.7,
-    CHECK_INTERVAL       = 0.12,
-    COOLDOWN             = 5,
-    LERP_SPEED           = 0.37,
-    DELAY_BEFORE_STAB    = 0.08,
-    BACKSTAB_TYPE        = "lerp",       -- "lerp" | "teleport" | "just auto stab (if its on)"
-    -- prediction
-    PREDICTION_ENABLED   = false,
-    PREDICTION_STRENGTH  = 0.6,
-    PREDICTION_TIME      = 0.12,
-    -- glidestab
-    GLIDESTAB_ENABLED    = false,
-    GLIDESTAB_COOLDOWN   = 3,
-    GLIDESTAB_BESIDE_TIMEOUT = 1,
-    GLIDESTAB_DURATION   = 0.4,
-    GLIDESTAB_CHECK_RATE = 0.06,
-    GLIDESTAB_TYPE       = "Legit",      -- "Legit" | "Teleport"
-    TARGET_ANIM_ID       = "89448354637442",
-    -- glidestab assist
-    ASSIST_ENABLED       = false,
-    ASSIST_DURATION      = 0.5,
-    ASSIST_CHECK_RATE    = 0.03,
-    -- general
-    AIMING_ENABLED       = true,
-    AIMING_MODE          = "Character",  -- "Character" | "Camera"
-    RANGE_MODE           = "Around",     -- "Around" | "Behind"
-    DIRECT_BEHIND        = false,
-    -- custom anims
-    INJECT_ANIMS_ENABLED = false,
-}
-
--- ==================== State ====================
-local State = {
-    enabled             = false,
-    daggerEnabled       = false,
-    lastBackstabTime    = 0,
-    lastGlidestabTime   = 0,
-    assistPrevPlaying   = false,
-    aimRefCount         = 0,
-    killerVelocity      = {},   -- [killerModel] = { pos, vel, look, prevLook, t }
-    injectLoop          = false,
-}
-
--- ==================== Anim keys / TwoTime ====================
-local animKeys = {
-    "CrouchStart","CrouchIdle","CrouchWalk","CrouchRun",
-    "Stab","LungeStart","LungeLoop","LungeEnd","Ritual",
-}
-local TwoTimeAnimInputs  = {}
-local initialModuleAnims = {}
-
-local function findTwoTimeConfig()
-    local ok, found = pcall(function()
-        return ReplicatedStorage:FindFirstChild("Assets")
-            and ReplicatedStorage.Assets:FindFirstChild("Survivors")
-            and ReplicatedStorage.Assets.Survivors:FindFirstChild("TwoTime")
-            and ReplicatedStorage.Assets.Survivors.TwoTime:FindFirstChild("Config")
-    end)
-    return (ok and found) or nil
-end
-
-local TwoTimePath = findTwoTimeConfig()
-
-local function tryRequireTwoTime()
-    if not TwoTimePath then TwoTimePath = findTwoTimeConfig() end
-    if not TwoTimePath then return false, "module not found" end
-    local ok, mod = pcall(require, TwoTimePath)
-    if not ok then return false, mod end
-    if type(mod) ~= "table" then return false, "module is not a table" end
-    return true, mod
-end
-
--- Seed initial anim values from the live module
-do
-    local ok, mod = tryRequireTwoTime()
-    for _, k in ipairs(animKeys) do
-        initialModuleAnims[k] = (ok and mod.Animations and tostring(mod.Animations[k] or "")) or ""
-        TwoTimeAnimInputs[k]  = initialModuleAnims[k]
-    end
-end
-
--- ==================== Utility ====================
-local function notify(title, text, duration)
-    pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title    = title,
-            Text     = text,
-            Duration = duration or 3,
-        })
-    end)
-end
-
-local function safeRead(tbl, ...)
-    local cur = tbl
-    for _, k in ipairs({...}) do
-        if type(cur) ~= "table" and type(cur) ~= "userdata" then return nil end
-        local ok, v = pcall(function() return cur[k] end)
-        if not ok then return nil end
-        cur = v
-    end
-    return cur
-end
-
-local function clampRange(v)
-    return math.max(0.5, math.min(v or CFG.DEFAULT_PROXIMITY, 500))
-end
-
-local function normalizeAnimId(id)
-    if not id then return "" end
-    return tostring(id):gsub("rbxassetid://", ""):match("^%s*(.-)%s*$")
-end
-
--- ==================== Character reattach ====================
-LocalPlayer.CharacterAdded:Connect(function()
-    State.aimRefCount = 0
-    local hum = getHumanoid()
-    if hum then pcall(function() hum.AutoRotate = true end) end
+-- GUI toggle
+toggleButton.MouseButton1Click:Connect(function()
+    enabled = not enabled
+    toggleButton.Text = "Backstab: " .. (enabled and "ON" or "OFF")
+    toggleButton.BackgroundColor3 = enabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(30, 30, 30)
 end)
 
--- ==================== Aiming helpers ====================
-local function setAutoRotate(value)
-    local hum = getHumanoid()
-    if hum then pcall(function() hum.AutoRotate = value end) end
-end
-
--- Thread-safe ref-counted aiming lock.
--- Returns a cleanup function that MUST be called exactly once.
-local function acquireAimLock()
-    if not CFG.AIMING_ENABLED then return function() end end
-    State.aimRefCount += 1
-    if State.aimRefCount == 1 then setAutoRotate(false) end
-    local released = false
-    return function()
-        if released then return end
-        released = true
-        State.aimRefCount = math.max(0, State.aimRefCount - 1)
-        if State.aimRefCount == 0 then setAutoRotate(true) end
-    end
-end
-
--- ==================== Killer folder helpers ====================
-local function getKillersFolder()
-    local wPlayers = Workspace:FindFirstChild("Players")
-    return wPlayers and wPlayers:FindFirstChild("Killers")
-end
-
-local function isValidKiller(model)
-    if not model or not model:IsA("Model") then return false end
-    local hrp = model:FindFirstChild("HumanoidRootPart")
-    local hum = model:FindFirstChildWhichIsA("Humanoid")
-    return hrp ~= nil and hum ~= nil and (hum.Health or 0) > 0
-end
-
-local function isPlayerCharacter(model)
-    if not model or not model:IsA("Model") then return false end
-    if not model:FindFirstChildWhichIsA("Humanoid") then return false end
-    return Players:GetPlayerFromCharacter(model) ~= nil
-end
-
--- ==================== Dagger UI helpers ====================
-local function getDaggerButton()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return nil end
-    local mainUI = pg:FindFirstChild("MainUI")
-    if not mainUI then return nil end
-    local container = mainUI:FindFirstChild("AbilityContainer")
-    if not container then return nil end
-    return container:FindFirstChild("Dagger")
-end
-
-local function getDaggerCooldownValue()
-    local btn = getDaggerButton()
-    if not btn then return nil end
-    -- try common child names/types in priority order
-    for _, name in ipairs({"CooldownTime","Cooldown","CooldownLabel","Timer","CD"}) do
-        local child = btn:FindFirstChild(name)
-        if child then
-            if child:IsA("NumberValue") then return child.Value end
-            if child:IsA("StringValue") then return tonumber(child.Value) end
-            if child:IsA("TextLabel") or child:IsA("TextBox") then return tonumber(child.Text) end
-        end
-    end
-    -- fallback: any NumberValue or StringValue child
-    local nv = btn:FindFirstChildWhichIsA("NumberValue")
-    if nv then return nv.Value end
-    local sv = btn:FindFirstChildWhichIsA("StringValue")
-    if sv then return tonumber(sv.Value) end
-    return nil
-end
-
-local function isDaggerReady()
-    local cd = getDaggerCooldownValue()
-    return not (cd and cd > 0.1)
-end
-
-local function tryActivateButton(btn)
-    if not btn then return false end
-    pcall(function() btn:Activate() end)
-
-    -- fire any MouseButton1Click connections via getconnections if available
-    pcall(function()
-        if type(getconnections) ~= "function" then return end
-        local ok2, conns = pcall(getconnections, btn.MouseButton1Click)
-        if not ok2 or not conns then return end
-        for _, conn in ipairs(conns) do
-            pcall(function()
-                if conn.Function then conn.Function()
-                elseif conn.func    then conn.func()
-                elseif conn.Fire    then conn.Fire()
-                end
-            end)
-        end
-    end)
-
-    -- also fire Activated signal if it exists
-    pcall(function()
-        local sig = rawget(btn, "Activated")
-        if sig and sig.Fire then sig:Fire() end
-    end)
-
-    return true
-end
-
--- ==================== Killer velocity tracker ====================
--- Keyed by killer model (not HRP part) to survive part refreshes.
-RunService.Heartbeat:Connect(function(dt)
-    local folder = getKillersFolder()
-    if not folder then return end
-    local now = os.clock()
-
-    for _, killer in ipairs(folder:GetChildren()) do
-        if not isValidKiller(killer) then continue end
-        local khrp = killer:FindFirstChild("HumanoidRootPart")
-        if not khrp then continue end
-
-        local pos  = khrp.Position
-        local look = khrp.CFrame.LookVector
-        local prev = State.killerVelocity[killer]
-
-        if prev and prev.t then
-            local elapsed = now - prev.t
-            if elapsed > 0 then
-                local rawVel = (pos - prev.pos) / elapsed
-                -- exponential smoothing
-                local alpha   = math.clamp(elapsed * 10, 0, 1)
-                local smoothV = prev.vel and prev.vel:Lerp(rawVel, alpha) or rawVel
-                State.killerVelocity[killer] = {
-                    pos = pos, vel = smoothV, look = look,
-                    prevLook = prev.look, t = now,
-                }
-            end
-        else
-            State.killerVelocity[killer] = {
-                pos = pos, vel = Vector3.zero, look = look,
-                prevLook = look, t = now,
-            }
-        end
-    end
-
-    -- purge stale entries (killer removed from folder)
-    for killer in pairs(State.killerVelocity) do
-        if not killer.Parent or killer.Parent ~= folder then
-            State.killerVelocity[killer] = nil
-        end
-    end
-end)
-
--- ==================== Velocity / Prediction helpers ====================
-local function getKillerVelocity(killer)
-    local tracked = State.killerVelocity[killer]
-    if tracked and tracked.vel then return tracked.vel end
-    -- fallback: AssemblyLinearVelocity (safe, non-deprecated)
-    local khrp = killer and killer:FindFirstChild("HumanoidRootPart")
-    if khrp then
-        local ok, v = pcall(function() return khrp.AssemblyLinearVelocity end)
-        if ok and v then return v end
-    end
-    return Vector3.zero
-end
-
-local function computeBehindCFrame(killer, selfHRP)
-    local khrp = killer:FindFirstChild("HumanoidRootPart")
-    if not khrp or not selfHRP then return nil end
-
-    local kCF   = khrp.CFrame
-    local fwd   = kCF.LookVector.Unit
-    local bDist = tonumber(CFG.BEHIND_DISTANCE) or 1.7
-    local base  = khrp.Position - fwd * bDist
-    base = Vector3.new(base.X, khrp.Position.Y, base.Z)
-
-    if not CFG.PREDICTION_ENABLED then
-        return CFrame.new(base, base + fwd)
-    end
-
-    local vel    = getKillerVelocity(killer)
-    local horiz  = Vector3.new(vel.X, 0, vel.Z)
-    local dt_p   = CFG.PREDICTION_TIME   or 0.12
-    local str    = CFG.PREDICTION_STRENGTH or 0.6
-    local move   = horiz * dt_p * str
-
-    local right  = kCF.RightVector
-    local fwdC   = fwd   * move:Dot(fwd)
-    local latC   = right * move:Dot(right)
-
-    -- turn compensation
-    local turnC  = Vector3.zero
-    local tracked = State.killerVelocity[killer]
-    if tracked and tracked.prevLook then
-        local dLook    = fwd - tracked.prevLook
-        local turnAmt  = dLook:Dot(right)
-        turnC = right * (turnAmt * 3.0 * str)
-    end
-
-    local offset = fwdC + latC + turnC
-    local final  = base + Vector3.new(offset.X, 0, offset.Z)
-    return CFrame.new(final, final + fwd)
-end
-
--- ==================== Main backstab activator ====================
-local function activateForKiller(killer, duration)
-    if not killer then return end
-    local char = getCharacter()
-    local hrp  = getHRP(char)
-    if not hrp then return end
-
-    duration = duration or CFG.DEFAULT_DURATION
-    local releaseAim = acquireAimLock()
-
-    if not CFG.AIMING_ENABLED then
-        task.delay(duration, releaseAim)
-        return
-    end
-
-    if hrp.Anchored then
-        pcall(function() hrp.Anchored = false end)
-    end
-
-    local btype = CFG.BACKSTAB_TYPE
-
-    if btype == "lerp" then
-        -- initial tween snap
-        local goal = computeBehindCFrame(killer, hrp)
-        if goal then
-            local ok, tween = pcall(function()
-                return TweenService:Create(hrp, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = goal})
-            end)
-            if ok and tween then pcall(function() tween:Play() end) end
-        end
-
-        local t0   = os.clock()
-        local conn
-        conn = RunService.Heartbeat:Connect(function()
-            if os.clock() - t0 >= duration then
-                conn:Disconnect(); releaseAim(); return
-            end
-            local khrp = killer:FindFirstChild("HumanoidRootPart")
-            if not khrp or not hrp then
-                conn:Disconnect(); releaseAim(); return
-            end
-            local target = computeBehindCFrame(killer, hrp)
-            if target then
-                -- exponential lerp: framerate-independent
-                local alpha = 1 - (1 - CFG.LERP_SPEED) ^ (RunService.Heartbeat:Wait() * 60 + 1)
-                -- simpler fallback: just use fixed alpha
-                pcall(function() hrp.CFrame = hrp.CFrame:Lerp(target, CFG.LERP_SPEED) end)
-            end
-        end)
-
-    elseif btype == "teleport" then
-        local t0   = os.clock()
-        local conn
-        conn = RunService.Heartbeat:Connect(function()
-            if os.clock() - t0 >= duration then
-                conn:Disconnect(); releaseAim(); return
-            end
-            local target = computeBehindCFrame(killer, hrp)
-            if target then pcall(function() hrp.CFrame = target end) end
-        end)
-
+-- TextBox Range Handling
+rangeBox.FocusLost:Connect(function()
+    local input = tonumber(rangeBox.Text)
+    if input and input >= 1 then
+        range = input
     else
-        -- "just auto stab (if its on)" - only rotate to face same direction
-        local t0   = os.clock()
-        local conn
-        conn = RunService.Heartbeat:Connect(function()
-            if os.clock() - t0 >= duration then
-                conn:Disconnect(); releaseAim(); return
-            end
-            local khrp = killer:FindFirstChild("HumanoidRootPart")
-            if not khrp then return end
-            local lookVec = khrp.CFrame.LookVector
-            local curPos  = hrp.Position
-            pcall(function() hrp.CFrame = CFrame.new(curPos, curPos + lookVec) end)
-        end)
+        rangeBox.Text = tostring(range)
+    end
+end)
+
+-- Mode Toggle
+local mode = "Behind"
+local modeButton = Instance.new("TextButton")
+modeButton.Size = UDim2.new(0, 150, 0, 25)
+modeButton.Position = UDim2.new(0, 10, 0, 105)
+modeButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+modeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+modeButton.Font = Enum.Font.SourceSans
+modeButton.TextSize = 16
+modeButton.Text = "Mode: Behind"
+modeButton.Parent = screenGui
+
+modeButton.MouseButton1Click:Connect(function()
+    if mode == "Behind" then
+        mode = "Around"
+    else
+        mode = "Behind"
+    end
+    modeButton.Text = "Mode: " .. mode
+end)
+
+-- Match Facing Toggle (only for Legit mode)
+local matchFacing = false
+local facingButton = Instance.new("TextButton")
+facingButton.Size = UDim2.new(0, 150, 0, 25)
+facingButton.Position = UDim2.new(0, 10, 0, 165)
+facingButton.BackgroundColor3 = Color3.fromRGB(110, 110, 110)
+facingButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+facingButton.Font = Enum.Font.SourceSans
+facingButton.TextSize = 16
+facingButton.Text = "Legit Aimbot: OFF"
+facingButton.Visible = false
+facingButton.Parent = screenGui
+
+facingButton.MouseButton1Click:Connect(function()
+    matchFacing = not matchFacing
+    facingButton.Text = "Legit Aimbot: " .. (matchFacing and "ON" or "OFF")
+    facingButton.BackgroundColor3 = matchFacing and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(110, 110, 110)
+end)
+
+-- Attack type button (Normal / Counter / Legit)
+local attackType = "Normal"
+local attackButton = Instance.new("TextButton")
+attackButton.Size = UDim2.new(0, 150, 0, 25)
+attackButton.Position = UDim2.new(0, 10, 0, 135)
+attackButton.BackgroundColor3 = Color3.fromRGB(90, 90, 90)
+attackButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+attackButton.Font = Enum.Font.SourceSans
+attackButton.TextSize = 16
+attackButton.Text = "Backstab Type: Normal"
+attackButton.Parent = screenGui
+
+attackButton.MouseButton1Click:Connect(function()
+    if attackType == "Normal" then
+        attackType = "Counter"
+    elseif attackType == "Counter" then
+        attackType = "Legit"
+    elseif attackType == "Legit" then
+        attackType = "Normal"
+    end
+    attackButton.Text = "Backstab Type: " .. attackType
+    facingButton.Visible = (attackType == "Legit")
+end)
+
+-- Hide Button
+local hideButton = Instance.new("TextButton")
+hideButton.Size = UDim2.new(0, 50, 0, 40)
+hideButton.Position = UDim2.new(0, 165, 0, 10)
+hideButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+hideButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+hideButton.Font = Enum.Font.SourceSansBold
+hideButton.TextSize = 20
+hideButton.Text = "Hide"
+hideButton.Parent = screenGui
+
+local guiHidden = false
+local guiElements = {}
+
+for _, obj in ipairs(screenGui:GetChildren()) do
+    if obj ~= hideButton then
+        table.insert(guiElements, obj)
     end
 end
 
--- ==================== Animation detection ====================
-local function isPlayingTargetAnim(char)
-    if not char then return false end
-    local hum = char:FindFirstChildWhichIsA("Humanoid")
-    if not hum then return false end
+hideButton.MouseButton1Click:Connect(function()
+    guiHidden = not guiHidden
+    hideButton.Text = guiHidden and "Show" or "Hide"
+    for _, obj in ipairs(guiElements) do
+        obj.Visible = not guiHidden
+    end
+end)
 
-    local ok, tracks = pcall(function() return hum:GetPlayingAnimationTracks() end)
-    if not ok or not tracks then return false end
+-- Animation IDs for Counter mode
+local counterAnimIDs = {
+    "126830014841198", "126355327951215", "121086746534252",
+    "18885909645", "98456918873918", "105458270463374",
+    "83829782357897", "125403313786645", "118298475669935",
+    "82113744478546", "70371667919898", "99135633258223",
+    "97167027849946", "109230267448394", "139835501033932",
+    "126896426760253", "109667959938617", "126681776859538",
+    "129976080405072", "121293883585738", "81639435858902",
+    "137314737492715", "92173139187970"
+}
 
-    local target = normalizeAnimId(CFG.TARGET_ANIM_ID)
-    for _, track in ipairs(tracks) do
-        local anim = track and track.Animation
-        if anim and anim.AnimationId then
-            if normalizeAnimId(anim.AnimationId) == target then
-                return true
+-- Helpers
+local function killerPlayingCounterAnim(killer)
+    local humanoid = killer:FindFirstChildOfClass("Humanoid")
+    if not humanoid or not humanoid:FindFirstChildOfClass("Animator") then return false end
+
+    for _, track in ipairs(humanoid.Animator:GetPlayingAnimationTracks()) do
+        if track.Animation and track.Animation.AnimationId then
+            local animIdNum = track.Animation.AnimationId:match("%d+")
+            for _, id in ipairs(counterAnimIDs) do
+                if tostring(animIdNum) == id then
+                    return true
+                end
             end
         end
     end
     return false
 end
 
--- ==================== GlideStab side-check ====================
-local function isBesideKiller(hrp, khrp, range)
-    if not hrp or not khrp then return false end
-    local rel  = hrp.Position - khrp.Position
-    local flat = Vector3.new(rel.X, 0, rel.Z)
-    if flat.Magnitude > range then return false end
-    if flat.Magnitude <= 0 then return false end
-    local sideDot = math.abs(flat.Unit:Dot(khrp.CFrame.RightVector))
-    return sideDot >= 0.9
-end
+local function tryActivateButton(btn)
+    if not btn then return false end
 
-local function findCandidateKillerForAssist(killersFolder, hrp, range)
-    if not killersFolder or not hrp then return nil end
-    range = range or math.huge
-    local nearest, nearestDist = nil, math.huge
-    for _, k in ipairs(killersFolder:GetChildren()) do
-        if isValidKiller(k) then
-            local khrp = k:FindFirstChild("HumanoidRootPart")
-            if khrp then
-                local dist = (khrp.Position - hrp.Position).Magnitude
-                if dist <= range then
-                    if isBesideKiller(hrp, khrp, range) then return k end
-                    if dist < nearestDist then nearest = k; nearestDist = dist end
-                end
-            end
-        end
-    end
-    return nearest
-end
-
--- ==================== GlideStab Assist ====================
-local function doGlidestabAssist(killer)
-    if not killer then return end
-    local char     = getCharacter()
-    local hrp      = getHRP(char)
-    local khrp     = killer:FindFirstChild("HumanoidRootPart")
-    if not hrp or not khrp then return end
-
-    local SIDE_DIST = 6
-    local mode      = CFG.AIMING_MODE
-    local cam       = Workspace.CurrentCamera
-    local prevCamCF = (mode == "Camera" and cam) and cam.CFrame or nil
-
-    local releaseAim = (mode == "Character") and acquireAimLock() or function() end
-
-    -- already beside — nothing to do
-    if isBesideKiller(hrp, khrp, CFG.DEFAULT_PROXIMITY) then
-        releaseAim(); return
-    end
-
-    local t0       = os.clock()
-    local duration = CFG.ASSIST_DURATION  or 0.5
-    local tickRate = CFG.ASSIST_CHECK_RATE or 0.03
-
-    while os.clock() - t0 < duration do
-        if not hrp or not khrp then break end
-        if isBesideKiller(hrp, khrp, CFG.DEFAULT_PROXIMITY) then break end
-
-        local rel      = hrp.Position - khrp.Position
-        local sideDot  = rel:Dot(khrp.CFrame.RightVector)
-        local sideSign = sideDot >= 0 and 1 or -1
-
-        local predictedPos = khrp.Position
-        if CFG.PREDICTION_ENABLED then
-            local vel   = getKillerVelocity(killer)
-            local horiz = Vector3.new(vel.X, 0, vel.Z)
-            predictedPos = predictedPos + horiz * (CFG.PREDICTION_TIME or 0.12) * (CFG.PREDICTION_STRENGTH or 0.6)
-        end
-
-        local sidePoint = predictedPos + khrp.CFrame.RightVector * sideSign * SIDE_DIST
-
-        if mode == "Character" then
-            pcall(function()
-                local p = hrp.Position
-                hrp.CFrame = CFrame.new(p, Vector3.new(sidePoint.X, p.Y, sidePoint.Z))
-            end)
-        elseif mode == "Camera" and cam then
-            pcall(function()
-                cam.CFrame = CFrame.new(cam.CFrame.Position, sidePoint)
-            end)
-        end
-
-        task.wait(tickRate)
-    end
-
-    releaseAim()
-    if mode == "Camera" and prevCamCF and Workspace.CurrentCamera then
-        pcall(function() Workspace.CurrentCamera.CFrame = prevCamCF end)
-    end
-end
-
--- ==================== Custom Anim injection ====================
-local function applyAnimsToModule(mod)
-    mod.Animations = mod.Animations or {}
-    for _, k in ipairs(animKeys) do
-        local v = TwoTimeAnimInputs[k]
-        if v and tostring(v) ~= "" then
-            mod.Animations[k] = tostring(v)
-        end
-    end
-end
-
-local function restoreAnims()
-    local ok, mod = tryRequireTwoTime()
-    if not ok then return false, mod end
     pcall(function()
-        mod.Animations = mod.Animations or {}
-        for _, k in ipairs(animKeys) do
-            local orig = initialModuleAnims[k]
-            mod.Animations[k] = (orig and orig ~= "") and orig or nil
+        if btn.Activate then btn:Activate() end
+    end)
+
+    local ok, conns = pcall(function()
+        if type(getconnections) == "function" and btn.MouseButton1Click then
+            return getconnections(btn.MouseButton1Click)
+        end
+        return nil
+    end)
+
+    if ok and conns then
+        for _, conn in ipairs(conns) do
+            pcall(function()
+                if conn.Function then
+                    conn.Function()
+                elseif conn.func then
+                    conn.func()
+                elseif conn.Fire then
+                    conn.Fire()
+                end
+            end)
+        end
+    end
+
+    pcall(function()
+        if btn.Activated then
+            btn.Activated:Fire()
         end
     end)
+
     return true
 end
 
-local function startInjectLoop()
-    State.injectLoop = true
-    task.spawn(function()
-        while State.injectLoop and CFG.INJECT_ANIMS_ENABLED do
-            local ok, mod = tryRequireTwoTime()
-            if ok then pcall(applyAnimsToModule, mod) end
-            task.wait(1)
+-- FIX: Search all of PlayerGui recursively for the Dagger button
+-- in case the UI hierarchy was renamed in a game update
+local function getDaggerButton()
+    local pg = lp:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+
+    -- Try original path first
+    local mainUI = pg:FindFirstChild("MainUI")
+    if mainUI then
+        local container = mainUI:FindFirstChild("AbilityContainer")
+        if container then
+            local dagger = container:FindFirstChild("Dagger")
+            if dagger then return dagger end
         end
-    end)
-end
-
--- ==================== Obsidian UI ====================
-local ok_lib, Library = pcall(function()
-    local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
-    local src  = game:HttpGet(repo .. "Library.lua")
-    assert(src and src ~= "", "HttpGet returned empty response")
-    return loadstring(src)()
-end)
-if not ok_lib then
-    warn("[AutoBackstab v4] Failed to load Obsidian UI: " .. tostring(Library))
-    warn("[AutoBackstab v4] Tip: if HttpGet is blocked, host the library locally.")
-end
-
-local ThemeManager, SaveManager
-if ok_lib and Library then
-    local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
-
-    pcall(function()
-        ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
-    end)
-    pcall(function()
-        SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
-    end)
-
-    Library.ForceCheckbox            = false
-    Library.ShowToggleFrameInKeybinds= true
-
-    local Window = Library:CreateWindow({
-        Title           = "Auto Backstab",
-        Footer          = "v4",
-        Icon            = 95816097006870,
-        NotifySide      = "Right",
-        ShowCustomCursor= true,
-    })
-
-    local Tabs = {
-        Main       = Window:AddTab("Main",         "sword"),
-        Prediction = Window:AddTab("Prediction",   "wrench"),
-        Techs      = Window:AddTab("Techs",        "wrench"),
-        CustomAnim = Window:AddTab("Custom Anims", "user"),
-        Misc       = Window:AddTab("Misc",         "swords"),
-        Settings   = Window:AddTab("Settings",     "settings"),
-    }
-
-    -- ---- Main Tab ----
-    local LG = Tabs.Main:AddLeftGroupbox("Auto Backstab")
-    local RG = Tabs.Main:AddRightGroupbox("Options")
-
-    LG:AddToggle("AutoBackstab", {
-        Text     = "Auto Backstab",
-        Tooltip  = "Automatically position behind killers",
-        Default  = false,
-        Callback = function(v) State.enabled = v end,
-    })
-
-    LG:AddInput("RangeInput", {
-        Text              = "Range (studs)",
-        Default           = tostring(CFG.DEFAULT_PROXIMITY),
-        Numeric           = true,
-        ClearTextOnFocus  = false,
-        Placeholder       = tostring(CFG.DEFAULT_PROXIMITY),
-        Callback          = function(v)
-            CFG.DEFAULT_PROXIMITY = clampRange(tonumber(v))
-        end,
-    })
-
-    LG:AddDropdown("RangeMode", {
-        Values   = {"Around", "Behind"},
-        Default  = 1,
-        Multi    = false,
-        Text     = "Range Mode",
-        Tooltip  = "Around = any direction; Behind = only when behind killer",
-        Callback = function(v) CFG.RANGE_MODE = v end,
-    })
-
-    LG:AddToggle("DirectBehind", {
-        Text     = "Strict Behind Check",
-        Tooltip  = "Tighter dot-product threshold for 'Behind' mode",
-        Default  = false,
-        Callback = function(v) CFG.DIRECT_BEHIND = v end,
-    })
-
-    LG:AddInput("BehindDistance", {
-        Text             = "Behind Distance (studs)",
-        Default          = tostring(CFG.BEHIND_DISTANCE),
-        Numeric          = true,
-        ClearTextOnFocus = false,
-        Placeholder      = "1.7",
-        Callback         = function(v) CFG.BEHIND_DISTANCE = tonumber(v) or CFG.BEHIND_DISTANCE end,
-    })
-
-    LG:AddToggle("AutoDagger", {
-        Text     = "Auto Stab (Dagger)",
-        Default  = false,
-        Callback = function(v) State.daggerEnabled = v end,
-    })
-
-    RG:AddDropdown("BackstabType", {
-        Values   = {"lerp", "teleport", "just auto stab (if its on)"},
-        Default  = 1,
-        Multi    = false,
-        Text     = "Backstab Type",
-        Callback = function(v) CFG.BACKSTAB_TYPE = v end,
-    })
-
-    RG:AddInput("LerpSpeed", {
-        Text             = "Lerp Speed",
-        Default          = tostring(CFG.LERP_SPEED),
-        Numeric          = true,
-        ClearTextOnFocus = false,
-        Placeholder      = "0.37",
-        Callback         = function(v) CFG.LERP_SPEED = tonumber(v) or CFG.LERP_SPEED end,
-    })
-
-    RG:AddToggle("Aiming", {
-        Text     = "Enable Aiming",
-        Default  = true,
-        Callback = function(v) CFG.AIMING_ENABLED = v end,
-    })
-
-    RG:AddInput("DelayStab", {
-        Text             = "Delay Before Dagger (s)",
-        Default          = tostring(CFG.DELAY_BEFORE_STAB),
-        Numeric          = true,
-        ClearTextOnFocus = false,
-        Placeholder      = "0.08",
-        Callback         = function(v) CFG.DELAY_BEFORE_STAB = tonumber(v) or CFG.DELAY_BEFORE_STAB end,
-    })
-
-    -- ---- Prediction Tab ----
-    local PL = Tabs.Prediction:AddLeftGroupbox("Prediction")
-
-    PL:AddToggle("EnablePrediction", {
-        Text     = "Enable Prediction",
-        Default  = false,
-        Callback = function(v) CFG.PREDICTION_ENABLED = v end,
-    })
-
-    PL:AddInput("PredStrength", {
-        Text             = "Prediction Strength",
-        Default          = tostring(CFG.PREDICTION_STRENGTH),
-        Numeric          = true,
-        ClearTextOnFocus = false,
-        Callback         = function(v) CFG.PREDICTION_STRENGTH = tonumber(v) or CFG.PREDICTION_STRENGTH end,
-    })
-
-    PL:AddInput("PredTime", {
-        Text             = "Prediction Time (s)",
-        Default          = tostring(CFG.PREDICTION_TIME),
-        Numeric          = true,
-        ClearTextOnFocus = false,
-        Callback         = function(v) CFG.PREDICTION_TIME = tonumber(v) or CFG.PREDICTION_TIME end,
-    })
-
-    -- ---- Techs Tab ----
-    local TL = Tabs.Techs:AddLeftGroupbox("GlideStab")
-
-    TL:AddLabel("GlideStab")
-
-    TL:AddToggle("GlideStab", {
-        Text     = "GlideStab",
-        Default  = false,
-        Callback = function(v) CFG.GLIDESTAB_ENABLED = v end,
-    })
-
-    TL:AddToggle("GlideStabAssist", {
-        Text     = "Aim at Killer's Side",
-        Default  = false,
-        Callback = function(v) CFG.ASSIST_ENABLED = v end,
-    })
-
-    TL:AddDropdown("GlideStabType", {
-        Values   = {"Legit", "Teleport"},
-        Default  = 1,
-        Multi    = false,
-        Text     = "GlideStab Type",
-        Callback = function(v) CFG.GLIDESTAB_TYPE = v end,
-    })
-
-    TL:AddDropdown("AimingMode", {
-        Values   = {"Character", "Camera"},
-        Default  = 1,
-        Multi    = false,
-        Text     = "Aiming Mode (GlideStab)",
-        Callback = function(v) CFG.AIMING_MODE = v end,
-    })
-
-    -- ---- Custom Anims Tab ----
-    local AL = Tabs.CustomAnim:AddLeftGroupbox("TwoTime Animations")
-    AL:AddLabel("Inject Anims before a round starts")
-
-    for _, key in ipairs(animKeys) do
-        AL:AddInput("TwoTimeAnim_" .. key, {
-            Text             = key,
-            Default          = initialModuleAnims[key] or "",
-            Numeric          = false,
-            ClearTextOnFocus = false,
-            Placeholder      = "rbxassetid://... or numeric ID",
-            Callback         = function(v) TwoTimeAnimInputs[key] = tostring(v or "") end,
-        })
     end
 
-    AL:AddToggle("InjectAnimsToggle", {
-        Text     = "Inject Anims",
-        Default  = false,
-        Callback = function(v)
-            CFG.INJECT_ANIMS_ENABLED = v
-            if v then
-                startInjectLoop()
-            else
-                State.injectLoop = false
-                local ok, err = restoreAnims()
-                if ok then
-                    notify("Inject Anims", "Original TwoTime animations restored.")
-                else
-                    notify("Inject Anims", "Failed to restore: " .. tostring(err))
-                end
-            end
-        end,
-    })
+    -- Fallback: search all GUIs for any object named "Dagger"
+    for _, gui in ipairs(pg:GetChildren()) do
+        local found = gui:FindFirstChild("Dagger", true) -- recursive
+        if found then return found end
+    end
 
-    -- ---- Misc Tab ----
-    local ML = Tabs.Misc:AddLeftGroupbox("Misc")
-    ML:AddButton("c00lgui (custom stamina & ESP)", function()
-        loadstring(game:HttpGet("https://rawscripts.net/raw/Forsaken-c00lgui-v15-ESP-EDITABLE-STAMINA-41624"))()
-    end)
-
-    -- ---- Settings Tab ----
-    local SL = Tabs.Settings:AddLeftGroupbox("UI Settings")
-
-    SL:AddToggle("KeybindMenuOpen", {
-        Default  = Library.KeybindFrame.Visible,
-        Text     = "Open Keybind Menu",
-        Callback = function(v) Library.KeybindFrame.Visible = v end,
-    })
-    SL:AddToggle("ShowCustomCursor", {
-        Text     = "Custom Cursor",
-        Default  = true,
-        Callback = function(v) Library.ShowCustomCursor = v end,
-    })
-    SL:AddDropdown("NotificationSide", {
-        Values   = {"Left", "Right"},
-        Default  = "Right",
-        Text     = "Notification Side",
-        Callback = function(v) Library:SetNotifySide(v) end,
-    })
-    SL:AddDropdown("DPIDropdown", {
-        Values   = {"50%","75%","100%","125%","150%","175%","200%"},
-        Default  = "100%",
-        Text     = "DPI Scale",
-        Callback = function(v)
-            Library:SetDPIScale(tonumber(v:gsub("%%","")))
-        end,
-    })
-    SL:AddDivider()
-    SL:AddLabel("Menu Bind"):AddKeyPicker("MenuKeybind", {Default = "RightShift", NoUI = true, Text = "Menu keybind"})
-    SL:AddButton("Unload Script", function() Library:Unload() end)
-
-    pcall(function() Library.ToggleKeybind = Library.Options.MenuKeybind end)
-
-    pcall(function()
-        if ThemeManager then
-            ThemeManager:SetLibrary(Library)
-            ThemeManager:SetFolder("autobackstab")
-            ThemeManager:ApplyToTab(Tabs.Settings)
-        end
-    end)
-
-    pcall(function()
-        if SaveManager then
-            SaveManager:SetLibrary(Library)
-            SaveManager:IgnoreThemeSettings()
-            SaveManager:SetIgnoreIndexes({"MenuKeybind"})
-            SaveManager:SetFolder("autobackshot/games")
-            SaveManager:SetSubFolder("Forsaken")
-            SaveManager:BuildConfigSection(Tabs.Settings)
-            SaveManager:LoadAutoloadConfig()
-        end
-    end)
+    return nil
 end
 
--- ==================== Main Backstab Watcher ====================
-task.spawn(function()
-    while true do
-        task.wait(CFG.CHECK_INTERVAL)
-        if not State.enabled then continue end
+local function isBehindTarget(hrp, targetHRP)
+    local distance = (hrp.Position - targetHRP.Position).Magnitude
+    if distance > range then return false end
 
-        local range  = clampRange(CFG.DEFAULT_PROXIMITY)
-        local folder = getKillersFolder()
-        if not folder then continue end
+    if mode == "Around" then
+        return true
+    else
+        local direction = -targetHRP.CFrame.LookVector
+        local toPlayer = (hrp.Position - targetHRP.Position)
+        return toPlayer:Dot(direction) > 0.3
+    end
+end
 
-        local char = getCharacter()
-        local hrp  = getHRP(char)
-        if not hrp then continue end
+-- FIX: Safe ping getter — Stats path changed in recent updates
+local function getPingSeconds()
+    local ok, ping = pcall(function()
+        local statsItem = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]
+        return tonumber(statsItem:GetValueString():match("%d+")) or 50
+    end)
+    if ok and ping then
+        return ping / 1000
+    end
+    -- Fallback: estimate ping via NetworkSettings if Stats path broke
+    local ok2, ping2 = pcall(function()
+        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"].Value
+    end)
+    if ok2 and ping2 then
+        return ping2 / 1000
+    end
+    return 0.05 -- default 50ms
+end
 
-        local now = os.clock()
-        if now - State.lastBackstabTime < CFG.COOLDOWN then continue end
+-- FIX: Use AssemblyLinearVelocity instead of deprecated .Velocity
+local function getVelocity(hrp)
+    -- AssemblyLinearVelocity is the current API (Velocity was deprecated)
+    local ok, vel = pcall(function() return hrp.AssemblyLinearVelocity end)
+    if ok and vel then return vel end
+    -- Fallback for older place versions that still work with .Velocity
+    local ok2, vel2 = pcall(function() return hrp.Velocity end)
+    if ok2 and vel2 then return vel2 end
+    return Vector3.zero
+end
 
-        for _, killer in ipairs(folder:GetChildren()) do
-            if not isValidKiller(killer) then continue end
-            local khrp = killer:FindFirstChild("HumanoidRootPart")
-            if not khrp then continue end
+-- Dagger cooldown tracking
+local daggerCooldownText
+local function refreshDaggerRef()
+    local mainui = lp:FindFirstChild("PlayerGui") and lp.PlayerGui:FindFirstChild("MainUI")
+    if mainui and mainui:FindFirstChild("AbilityContainer") then
+        local dagger = mainui.AbilityContainer:FindFirstChild("Dagger")
+        if dagger and dagger:FindFirstChild("CooldownTime") then
+            daggerCooldownText = dagger.CooldownTime
+            return
+        end
+    end
+    -- Fallback: search recursively
+    local pg = lp:FindFirstChild("PlayerGui")
+    if pg then
+        local dagger = pg:FindFirstChild("Dagger", true)
+        if dagger then
+            local ct = dagger:FindFirstChild("CooldownTime")
+            if ct then
+                daggerCooldownText = ct
+                return
+            end
+        end
+    end
+    daggerCooldownText = nil
+end
 
-            local dist     = (khrp.Position - hrp.Position).Magnitude
-            local trigger  = false
+lp.PlayerGui.DescendantAdded:Connect(refreshDaggerRef)
+lp.PlayerGui.DescendantRemoving:Connect(function(obj)
+    if obj == daggerCooldownText then
+        daggerCooldownText = nil
+    end
+end)
 
-            if CFG.RANGE_MODE == "Around" then
-                trigger = dist <= range
-            else
-                -- Behind mode
-                local rel        = hrp.Position - khrp.Position
-                local forwardDot = rel:Dot(khrp.CFrame.LookVector)
-                local behindDist = -forwardDot
-                local angleDot   = rel.Magnitude > 0 and rel.Unit:Dot(khrp.CFrame.LookVector) or 0
+refreshDaggerRef()
 
-                local passedDot  = CFG.DIRECT_BEHIND and (angleDot <= -0.85) or (forwardDot < 0.3)
-                trigger = passedDot and behindDist <= range and dist <= range and isPlayerCharacter(killer)
+RunService.RenderStepped:Connect(function()
+    if not daggerCooldownText or not daggerCooldownText.Parent then return end
+    if tonumber(daggerCooldownText.Text) then return end -- still on cooldown
+    if not enabled or cooldown then return end
+
+    local char = lp.Character
+    if not (char and char:FindFirstChild("HumanoidRootPart")) then return end
+    local hrp = char.HumanoidRootPart
+
+    for _, name in ipairs(killerNames) do
+        local killer = killersFolder:FindFirstChild(name)
+        if killer and killer:FindFirstChild("HumanoidRootPart") then
+            local kHRP = killer.HumanoidRootPart
+
+            if attackType == "Legit" then
+                local dist = (kHRP.Position - hrp.Position).Magnitude
+                if dist <= range then
+                    if matchFacing then
+                        hrp.CFrame = CFrame.new(hrp.Position, hrp.Position + kHRP.CFrame.LookVector)
+                    end
+                    if mode == "Behind" then
+                        local directionToTarget = (kHRP.Position - hrp.Position).Unit
+                        local dot = hrp.CFrame.LookVector:Dot(directionToTarget)
+                        if dot > 0.6 then
+                            return
+                        end
+                    end
+                    local daggerbtn = getDaggerButton()
+                    tryActivateButton(daggerbtn)
+                end
+                return
             end
 
-            if trigger and isDaggerReady() then
-                State.lastBackstabTime = now
-                local daggerbtn = getDaggerButton()
-                task.spawn(function()
-                    activateForKiller(killer, CFG.DEFAULT_DURATION)
-                    if State.daggerEnabled then
-                        task.wait(CFG.DELAY_BEFORE_STAB)
+            if attackType == "Counter" and not killerPlayingCounterAnim(killer) then
+                continue
+            end
+
+            if isBehindTarget(hrp, kHRP) and killer ~= lastTarget then
+                cooldown = true
+                lastTarget = killer
+
+                local start = tick()
+                local didDagger = false
+                local connection
+
+                connection = RunService.Heartbeat:Connect(function()
+                    if not (char and char.Parent and kHRP and kHRP.Parent) then
+                        if connection then connection:Disconnect() end
+                        return
+                    end
+
+                    local elapsed = tick() - start
+                    if elapsed >= 0.5 then
+                        if connection then connection:Disconnect() end
+                        return
+                    end
+
+                    -- FIX: use helper for both ping and velocity
+                    local pingSeconds = getPingSeconds()
+                    local killerVelocity = getVelocity(kHRP)
+                    local moveDir = killerVelocity.Magnitude > 0.1 and killerVelocity.Unit or Vector3.new()
+                    local pingOffset = moveDir * (pingSeconds * killerVelocity.Magnitude)
+                    local predictedPos = kHRP.Position + pingOffset
+
+                    local targetPos
+                    if mode == "Behind" then
+                        targetPos = predictedPos - (kHRP.CFrame.LookVector * 0.3)
+                    elseif mode == "Around" then
+                        local rightVec = kHRP.CFrame.RightVector
+                        local rel = (hrp.Position - kHRP.Position)
+                        local lateralSpeed = killerVelocity:Dot(rightVec)
+                        local baseOffset = (rel.Magnitude > 0.1) and rel.Unit * 0.3 or Vector3.new()
+                        local lateralOffset = rightVec * lateralSpeed * 0.3
+                        targetPos = predictedPos + baseOffset + lateralOffset
+                    end
+
+                    hrp.CFrame = CFrame.new(targetPos, targetPos + kHRP.CFrame.LookVector)
+
+                    if not didDagger then
+                        didDagger = true
+
+                        local faceStart = tick()
+                        local faceConn
+                        faceConn = RunService.Heartbeat:Connect(function()
+                            if tick() - faceStart >= 0.7 or not kHRP or not kHRP.Parent then
+                                if faceConn then faceConn:Disconnect() end
+                                return
+                            end
+
+                            -- FIX: use helpers here too
+                            local livePingSeconds = getPingSeconds()
+                            local liveVelocity = getVelocity(kHRP)
+                            local liveMoveDir = liveVelocity.Magnitude > 0.1 and liveVelocity.Unit or Vector3.new()
+                            local livePingOffset = liveMoveDir * (livePingSeconds * liveVelocity.Magnitude)
+                            local livePredictedPos = kHRP.Position + livePingOffset
+
+                            local liveTargetPos
+                            if mode == "Behind" then
+                                liveTargetPos = livePredictedPos - (kHRP.CFrame.LookVector * 0.3)
+                            elseif mode == "Around" then
+                                local rightVec = kHRP.CFrame.RightVector
+                                local liveRel = (hrp.Position - kHRP.Position)
+                                local liveLateralSpeed = liveVelocity:Dot(rightVec)
+                                local baseOffset = (liveRel.Magnitude > 0.1) and liveRel.Unit * 0.3 or Vector3.new()
+                                local lateralOffset = rightVec * liveLateralSpeed * 0.3
+                                liveTargetPos = livePredictedPos + baseOffset + lateralOffset
+                            end
+                            hrp.CFrame = CFrame.new(liveTargetPos, liveTargetPos + kHRP.CFrame.LookVector)
+                        end)
+
+                        local daggerbtn = getDaggerButton()
                         tryActivateButton(daggerbtn)
                     end
                 end)
-                break  -- only trigger for one killer per cycle
-            end
-        end
-    end
-end)
 
--- ==================== GlideStab Watcher ====================
-task.spawn(function()
-    while true do
-        task.wait(CFG.GLIDESTAB_CHECK_RATE)
-        if not CFG.GLIDESTAB_ENABLED then continue end
-        if os.clock() - State.lastGlidestabTime < CFG.GLIDESTAB_COOLDOWN then continue end
-
-        local char = getCharacter()
-        local hrp  = getHRP(char)
-        if not hrp then continue end
-        if not isPlayingTargetAnim(char) then continue end
-
-        local folder = getKillersFolder()
-        if not folder then continue end
-
-        local range     = clampRange(CFG.DEFAULT_PROXIMITY)
-        local candidate = nil
-
-        for _, killer in ipairs(folder:GetChildren()) do
-            if not isValidKiller(killer) then continue end
-            local khrp = killer:FindFirstChild("HumanoidRootPart")
-            if not khrp then continue end
-
-            local dist = (khrp.Position - hrp.Position).Magnitude
-            if dist > range then continue end
-
-            -- wait up to timeout for player to arrive beside killer
-            local t0      = os.clock()
-            local timeout = CFG.GLIDESTAB_BESIDE_TIMEOUT or 1
-            while os.clock() - t0 < timeout do
-                if isBesideKiller(hrp, khrp, range) then
-                    candidate = killer; break
-                end
-                task.wait(0.05)
-            end
-            if candidate then break end
-        end
-
-        if not candidate then continue end
-
-        local khrp      = candidate:FindFirstChild("HumanoidRootPart")
-        if not khrp then continue end
-
-        local daggerbtn = getDaggerButton()
-        local mode      = CFG.AIMING_MODE
-        local cam       = Workspace.CurrentCamera
-        local prevCamCF = (mode == "Camera" and cam) and cam.CFrame or nil
-        local releaseAim= (mode == "Character") and acquireAimLock() or function() end
-
-        State.lastGlidestabTime = os.clock()
-        local endTime = os.clock() + (CFG.GLIDESTAB_DURATION or 0.4)
-
-        if CFG.GLIDESTAB_TYPE == "Teleport" then
-            while os.clock() < endTime do
-                if not hrp or not khrp then break end
-                local fwd   = khrp.CFrame.LookVector.Unit
-                local bDist = tonumber(CFG.BEHIND_DISTANCE) or 1.7
-                local bPos  = khrp.Position - fwd * bDist
-                local tPos  = Vector3.new(bPos.X, hrp.Position.Y, bPos.Z)
-                pcall(function() hrp.CFrame = CFrame.new(tPos, tPos + fwd) end)
-                pcall(function() tryActivateButton(daggerbtn) end)
-                task.wait(0.03)
-            end
-        else
-            -- Legit: aim at killer while beside them
-            while os.clock() < endTime do
-                if not hrp or not khrp then break end
-                if not isBesideKiller(hrp, khrp, range) then break end
-
-                if mode == "Character" then
-                    pcall(function()
-                        local p = hrp.Position
-                        hrp.CFrame = CFrame.new(p, Vector3.new(khrp.Position.X, p.Y, khrp.Position.Z))
-                    end)
-                elseif mode == "Camera" and cam then
-                    pcall(function()
-                        cam.CFrame = CFrame.new(cam.CFrame.Position, khrp.Position)
-                    end)
-                end
-
-                pcall(function() tryActivateButton(daggerbtn) end)
-                task.wait(0.06)
-            end
-        end
-
-        releaseAim()
-        if mode == "Camera" and prevCamCF and Workspace.CurrentCamera then
-            pcall(function() Workspace.CurrentCamera.CFrame = prevCamCF end)
-        end
-    end
-end)
-
--- ==================== GlideStab Assist Watcher ====================
-task.spawn(function()
-    while true do
-        task.wait(CFG.ASSIST_CHECK_RATE)
-
-        if not CFG.ASSIST_ENABLED then
-            State.assistPrevPlaying = false
-            continue
-        end
-
-        local char = getCharacter()
-        if not char then State.assistPrevPlaying = false; continue end
-
-        local playing = isPlayingTargetAnim(char)
-
-        -- Only trigger on rising edge (animation just started)
-        if playing and not State.assistPrevPlaying then
-            local folder = getKillersFolder()
-            if folder then
-                local hrp       = getHRP(char)
-                local candidate = nil
-
-                local ok, res = pcall(findCandidateKillerForAssist, folder, hrp, math.huge)
-                if ok and res then
-                    candidate = res
-                else
-                    -- fallback: first valid killer
-                    for _, k in ipairs(folder:GetChildren()) do
-                        if isValidKiller(k) then candidate = k; break end
+                task.delay(2, function()
+                    RunService.Heartbeat:Wait()
+                    while isBehindTarget(hrp, kHRP) do
+                        RunService.Heartbeat:Wait()
                     end
-                end
+                    lastTarget = nil
+                    cooldown = false
+                end)
 
-                if candidate then
-                    task.spawn(function()
-                        pcall(doGlidestabAssist, candidate)
-                    end)
-                end
+                break
             end
         end
-
-        State.assistPrevPlaying = playing
     end
 end)
