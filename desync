@@ -1,424 +1,463 @@
---[[
-    BACKSTAB PRO - Improved Backstab Script
-    Features: Sleek GUI, configurable settings, robust targeting,
-              cooldown feedback, multi-killer support, safe cleanup
---]]
-
-local Players         = game:GetService("Players")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService      = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService    = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local lp = Players.LocalPlayer
 
-local lp  = Players.LocalPlayer
-local gui = lp:WaitForChild("PlayerGui")
+-- GUI Setup
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "BackstabToggleGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = lp:WaitForChild("PlayerGui")
 
--- ─── Config ───────────────────────────────────────────────────────────────────
-local CONFIG = {
-    range         = 4,          -- detection radius (studs)
-    minRange      = 1,
-    maxRange      = 15,
-    dotThreshold  = 0.45,       -- how strictly "behind" means behind (0 = side-on, 1 = directly behind)
-    tpOffset      = 0.4,        -- studs behind killer on teleport
-    tpDuration    = 0.55,       -- seconds to keep teleporting
-    lookDuration  = 0.65,       -- seconds to align look direction
-    globalCooldown = 2.2,       -- seconds before re-triggering same killer
-    daggerEvent   = {"Modules", "Network", "RemoteEvent"},
-    killerNames   = {"Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli"},
-    killersPath   = {"Players", "Killers"},
-    modes         = {"Behind", "Around"},
+-- Toggle Button
+local toggleButton = Instance.new("TextButton")
+toggleButton.Size = UDim2.new(0, 150, 0, 40)
+toggleButton.Position = UDim2.new(0, 10, 0, 10)
+toggleButton.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.Font = Enum.Font.SourceSansBold
+toggleButton.TextSize = 20
+toggleButton.Text = "Backstab: OFF"
+toggleButton.Parent = screenGui
+
+-- Range Label
+local rangeLabel = Instance.new("TextLabel")
+rangeLabel.Size = UDim2.new(0, 150, 0, 20)
+rangeLabel.Position = UDim2.new(0, 10, 0, 55)
+rangeLabel.BackgroundTransparency = 1
+rangeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+rangeLabel.Font = Enum.Font.SourceSans
+rangeLabel.TextSize = 16
+rangeLabel.Text = "Range:"
+rangeLabel.Parent = screenGui
+
+-- TextBox for Range Input
+local rangeBox = Instance.new("TextBox")
+rangeBox.Size = UDim2.new(0, 150, 0, 25)
+rangeBox.Position = UDim2.new(0, 10, 0, 75)
+rangeBox.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+rangeBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+rangeBox.Font = Enum.Font.SourceSans
+rangeBox.TextSize = 16
+rangeBox.PlaceholderText = "Enter range (number)"
+rangeBox.Text = "4"
+rangeBox.ClearTextOnFocus = false
+rangeBox.Parent = screenGui
+
+-- Vars
+local enabled = false
+local cooldown = false
+local lastTarget = nil
+local range = 4
+local daggerRemote = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Network"):WaitForChild("RemoteEvent")
+local killerNames = { "Jason", "c00lkidd", "JohnDoe", "1x1x1x1", "Noli", "Slasher" }
+local killersFolder = workspace:WaitForChild("Players"):WaitForChild("Killers")
+
+-- GUI toggle
+toggleButton.MouseButton1Click:Connect(function()
+    enabled = not enabled
+    toggleButton.Text = "Backstab: " .. (enabled and "ON" or "OFF")
+    toggleButton.BackgroundColor3 = enabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(30, 30, 30)
+end)
+
+-- TextBox Range Handling
+rangeBox.FocusLost:Connect(function()
+    local input = tonumber(rangeBox.Text)
+    if input and input >= 1 then
+        range = input
+    else
+        rangeBox.Text = tostring(range)
+    end
+end)
+
+-- Mode Toggle
+local mode = "Behind"
+local modeButton = Instance.new("TextButton")
+modeButton.Size = UDim2.new(0, 150, 0, 25)
+modeButton.Position = UDim2.new(0, 10, 0, 105)
+modeButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+modeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+modeButton.Font = Enum.Font.SourceSans
+modeButton.TextSize = 16
+modeButton.Text = "Mode: Behind"
+modeButton.Parent = screenGui
+
+modeButton.MouseButton1Click:Connect(function()
+    if mode == "Behind" then
+        mode = "Around"
+    else
+        mode = "Behind"
+    end
+    modeButton.Text = "Mode: " .. mode
+end)
+
+-- Match Facing Toggle (only for Legit mode)
+local matchFacing = false
+local facingButton = Instance.new("TextButton")
+facingButton.Size = UDim2.new(0, 150, 0, 25)
+facingButton.Position = UDim2.new(0, 10, 0, 165)
+facingButton.BackgroundColor3 = Color3.fromRGB(110, 110, 110)
+facingButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+facingButton.Font = Enum.Font.SourceSans
+facingButton.TextSize = 16
+facingButton.Text = "Legit Aimbot: OFF"
+facingButton.Visible = false
+facingButton.Parent = screenGui
+
+facingButton.MouseButton1Click:Connect(function()
+    matchFacing = not matchFacing
+    facingButton.Text = "Legit Aimbot: " .. (matchFacing and "ON" or "OFF")
+    facingButton.BackgroundColor3 = matchFacing and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(110, 110, 110)
+end)
+
+-- Attack type button (Normal / Counter / Legit)
+local attackType = "Normal"
+local attackButton = Instance.new("TextButton")
+attackButton.Size = UDim2.new(0, 150, 0, 25)
+attackButton.Position = UDim2.new(0, 10, 0, 135)
+attackButton.BackgroundColor3 = Color3.fromRGB(90, 90, 90)
+attackButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+attackButton.Font = Enum.Font.SourceSans
+attackButton.TextSize = 16
+attackButton.Text = "Backstab Type: Normal"
+attackButton.Parent = screenGui
+
+attackButton.MouseButton1Click:Connect(function()
+    if attackType == "Normal" then
+        attackType = "Counter"
+    elseif attackType == "Counter" then
+        attackType = "Legit"
+    elseif attackType == "Legit" then
+        attackType = "Normal"
+    end
+    attackButton.Text = "Backstab Type: " .. attackType
+    facingButton.Visible = (attackType == "Legit")
+end)
+
+-- Hide Button
+local hideButton = Instance.new("TextButton")
+hideButton.Size = UDim2.new(0, 50, 0, 40)
+hideButton.Position = UDim2.new(0, 165, 0, 10)
+hideButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+hideButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+hideButton.Font = Enum.Font.SourceSansBold
+hideButton.TextSize = 20
+hideButton.Text = "Hide"
+hideButton.Parent = screenGui
+
+local guiHidden = false
+local guiElements = {}
+
+for _, obj in ipairs(screenGui:GetChildren()) do
+    if obj ~= hideButton then
+        table.insert(guiElements, obj)
+    end
+end
+
+hideButton.MouseButton1Click:Connect(function()
+    guiHidden = not guiHidden
+    hideButton.Text = guiHidden and "Show" or "Hide"
+    for _, obj in ipairs(guiElements) do
+        obj.Visible = not guiHidden
+    end
+end)
+
+-- Animation IDs for Counter mode
+local counterAnimIDs = {
+    "126830014841198", "126355327951215", "121086746534252",
+    "18885909645", "98456918873918", "105458270463374",
+    "83829782357897", "125403313786645", "118298475669935",
+    "82113744478546", "70371667919898", "99135633258223",
+    "97167027849946", "109230267448394", "139835501033932",
+    "126896426760253", "109667959938617", "126681776859538",
+    "129976080405072", "121293883585738", "81639435858902",
+    "137314737492715", "92173139187970"
 }
 
--- ─── State ────────────────────────────────────────────────────────────────────
-local state = {
-    enabled    = false,
-    mode       = "Behind",
-    cooldowns  = {},   -- [killerName] = timestamp
-    connection = nil,
-}
+-- Helpers
+local function killerPlayingCounterAnim(killer)
+    local humanoid = killer:FindFirstChildOfClass("Humanoid")
+    if not humanoid or not humanoid:FindFirstChildOfClass("Animator") then return false end
 
--- ─── Resolve paths safely ─────────────────────────────────────────────────────
-local function waitPath(root, ...)
-    local node = root
-    for _, name in ipairs({...}) do
-        node = node:WaitForChild(name, 10)
-        if not node then return nil end
+    for _, track in ipairs(humanoid.Animator:GetPlayingAnimationTracks()) do
+        if track.Animation and track.Animation.AnimationId then
+            local animIdNum = track.Animation.AnimationId:match("%d+")
+            for _, id in ipairs(counterAnimIDs) do
+                if tostring(animIdNum) == id then
+                    return true
+                end
+            end
+        end
     end
-    return node
+    return false
 end
 
-local daggerRemote  = waitPath(ReplicatedStorage, table.unpack(CONFIG.daggerEvent))
-local killersFolder = waitPath(workspace, table.unpack(CONFIG.killersPath))
+local function tryActivateButton(btn)
+    if not btn then return false end
 
-if not daggerRemote or not killersFolder then
-    warn("[BackstabPro] Failed to find required paths – aborting.")
-    return
-end
+    pcall(function()
+        if btn.Activate then btn:Activate() end
+    end)
 
--- ─── Helpers ──────────────────────────────────────────────────────────────────
-local function getChar()
-    local char = lp.Character
-    if char and char:FindFirstChild("HumanoidRootPart") then
-        return char, char.HumanoidRootPart
+    local ok, conns = pcall(function()
+        if type(getconnections) == "function" and btn.MouseButton1Click then
+            return getconnections(btn.MouseButton1Click)
+        end
+        return nil
+    end)
+
+    if ok and conns then
+        for _, conn in ipairs(conns) do
+            pcall(function()
+                if conn.Function then
+                    conn.Function()
+                elseif conn.func then
+                    conn.func()
+                elseif conn.Fire then
+                    conn.Fire()
+                end
+            end)
+        end
     end
-end
 
-local function isOnCooldown(name)
-    local t = state.cooldowns[name]
-    return t and (tick() - t) < CONFIG.globalCooldown
-end
+    pcall(function()
+        if btn.Activated then
+            btn.Activated:Fire()
+        end
+    end)
 
-local function setCooldown(name)
-    state.cooldowns[name] = tick()
-end
-
-local function isBehind(hrp, targetHRP)
-    local diff = hrp.Position - targetHRP.Position
-    if diff.Magnitude > CONFIG.range then return false end
-    if state.mode == "Around" then return true end
-    -- dot product: positive = behind the killer's look direction
-    return diff:Dot(-targetHRP.CFrame.LookVector) > CONFIG.dotThreshold
-end
-
--- Safe teleport: only move if character and target still exist
-local function safeTeleport(hrp, targetHRP)
-    if not (hrp and hrp.Parent and targetHRP and targetHRP.Parent) then return false end
-    local behindPos = targetHRP.Position - (targetHRP.CFrame.LookVector * CONFIG.tpOffset)
-    hrp.CFrame = CFrame.new(behindPos, behindPos + targetHRP.CFrame.LookVector)
     return true
 end
 
--- ─── Core backstab routine ────────────────────────────────────────────────────
-local function performBackstab(killer)
-    local name = killer.Name
-    setCooldown(name)
+-- FIX: Search all of PlayerGui recursively for the Dagger button
+-- in case the UI hierarchy was renamed in a game update
+local function getDaggerButton()
+    local pg = lp:FindFirstChild("PlayerGui")
+    if not pg then return nil end
 
-    local char, hrp = getChar()
-    if not char then return end
+    -- Try original path first
+    local mainUI = pg:FindFirstChild("MainUI")
+    if mainUI then
+        local container = mainUI:FindFirstChild("AbilityContainer")
+        if container then
+            local dagger = container:FindFirstChild("Dagger")
+            if dagger then return dagger end
+        end
+    end
 
-    local kHRP = killer:FindFirstChild("HumanoidRootPart")
-    if not kHRP then return end
+    -- Fallback: search all GUIs for any object named "Dagger"
+    for _, gui in ipairs(pg:GetChildren()) do
+        local found = gui:FindFirstChild("Dagger", true) -- recursive
+        if found then return found end
+    end
 
-    local startTime = tick()
-    local daggerFired = false
-    local tpConn, lookConn
+    return nil
+end
 
-    -- Phase 1: constant TP behind killer
-    tpConn = RunService.Heartbeat:Connect(function()
-        local char2, hrp2 = getChar()
-        if not char2 or (tick() - startTime) >= CONFIG.tpDuration then
-            tpConn:Disconnect()
+local function isBehindTarget(hrp, targetHRP)
+    local distance = (hrp.Position - targetHRP.Position).Magnitude
+    if distance > range then return false end
+
+    if mode == "Around" then
+        return true
+    else
+        local direction = -targetHRP.CFrame.LookVector
+        local toPlayer = (hrp.Position - targetHRP.Position)
+        return toPlayer:Dot(direction) > 0.3
+    end
+end
+
+-- FIX: Safe ping getter — Stats path changed in recent updates
+local function getPingSeconds()
+    local ok, ping = pcall(function()
+        local statsItem = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]
+        return tonumber(statsItem:GetValueString():match("%d+")) or 50
+    end)
+    if ok and ping then
+        return ping / 1000
+    end
+    -- Fallback: estimate ping via NetworkSettings if Stats path broke
+    local ok2, ping2 = pcall(function()
+        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"].Value
+    end)
+    if ok2 and ping2 then
+        return ping2 / 1000
+    end
+    return 0.05 -- default 50ms
+end
+
+-- FIX: Use AssemblyLinearVelocity instead of deprecated .Velocity
+local function getVelocity(hrp)
+    -- AssemblyLinearVelocity is the current API (Velocity was deprecated)
+    local ok, vel = pcall(function() return hrp.AssemblyLinearVelocity end)
+    if ok and vel then return vel end
+    -- Fallback for older place versions that still work with .Velocity
+    local ok2, vel2 = pcall(function() return hrp.Velocity end)
+    if ok2 and vel2 then return vel2 end
+    return Vector3.zero
+end
+
+-- Dagger cooldown tracking
+local daggerCooldownText
+local function refreshDaggerRef()
+    local mainui = lp:FindFirstChild("PlayerGui") and lp.PlayerGui:FindFirstChild("MainUI")
+    if mainui and mainui:FindFirstChild("AbilityContainer") then
+        local dagger = mainui.AbilityContainer:FindFirstChild("Dagger")
+        if dagger and dagger:FindFirstChild("CooldownTime") then
+            daggerCooldownText = dagger.CooldownTime
             return
         end
-        safeTeleport(hrp2, kHRP)
-
-        if not daggerFired then
-            daggerFired = true
-
-            -- Phase 2: align look direction
-            local lookStart = tick()
-            lookConn = RunService.Heartbeat:Connect(function()
-                local _, hrp3 = getChar()
-                if not hrp3 or not kHRP.Parent or (tick() - lookStart) >= CONFIG.lookDuration then
-                    if lookConn then lookConn:Disconnect() end
-                    return
-                end
-                hrp3.CFrame = CFrame.new(hrp3.Position, hrp3.Position + kHRP.CFrame.LookVector)
-            end)
-
-            -- Fire dagger
-            daggerRemote:FireServer("UseActorAbility", "Dagger")
-        end
-    end)
-
-    -- Phase 3: reset cooldown after leaving range
-    task.spawn(function()
-        task.wait(CONFIG.globalCooldown)
-        local _, hrp2 = getChar()
-        if hrp2 and kHRP.Parent then
-            local waited = 0
-            while isBehind(hrp2, kHRP) and waited < 10 do
-                RunService.Heartbeat:Wait()
-                waited += 1
-                _, hrp2 = getChar()
-                if not hrp2 then break end
+    end
+    -- Fallback: search recursively
+    local pg = lp:FindFirstChild("PlayerGui")
+    if pg then
+        local dagger = pg:FindFirstChild("Dagger", true)
+        if dagger then
+            local ct = dagger:FindFirstChild("CooldownTime")
+            if ct then
+                daggerCooldownText = ct
+                return
             end
         end
-        -- cooldown already recorded by timestamp; no extra flag needed
-    end)
+    end
+    daggerCooldownText = nil
 end
 
--- ─── Main loop ────────────────────────────────────────────────────────────────
-local function startLoop()
-    if state.connection then state.connection:Disconnect() end
+lp.PlayerGui.DescendantAdded:Connect(refreshDaggerRef)
+lp.PlayerGui.DescendantRemoving:Connect(function(obj)
+    if obj == daggerCooldownText then
+        daggerCooldownText = nil
+    end
+end)
 
-    state.connection = RunService.Heartbeat:Connect(function()
-        if not state.enabled then return end
+refreshDaggerRef()
 
-        local char, hrp = getChar()
-        if not char then return end
+RunService.RenderStepped:Connect(function()
+    if not daggerCooldownText or not daggerCooldownText.Parent then return end
+    if tonumber(daggerCooldownText.Text) then return end -- still on cooldown
+    if not enabled or cooldown then return end
 
-        for _, name in ipairs(CONFIG.killerNames) do
-            if not isOnCooldown(name) then
-                local killer = killersFolder:FindFirstChild(name)
-                if killer and killer:FindFirstChild("HumanoidRootPart") then
-                    if isBehind(hrp, killer.HumanoidRootPart) then
-                        task.spawn(performBackstab, killer)
-                        break  -- one backstab per frame
+    local char = lp.Character
+    if not (char and char:FindFirstChild("HumanoidRootPart")) then return end
+    local hrp = char.HumanoidRootPart
+
+    for _, name in ipairs(killerNames) do
+        local killer = killersFolder:FindFirstChild(name)
+        if killer and killer:FindFirstChild("HumanoidRootPart") then
+            local kHRP = killer.HumanoidRootPart
+
+            if attackType == "Legit" then
+                local dist = (kHRP.Position - hrp.Position).Magnitude
+                if dist <= range then
+                    if matchFacing then
+                        hrp.CFrame = CFrame.new(hrp.Position, hrp.Position + kHRP.CFrame.LookVector)
                     end
-                end
-            end
-        end
-    end)
-end
-
-startLoop()
-
--- ═══════════════════════════════════════════════════════════════════════════════
---  G U I
--- ═══════════════════════════════════════════════════════════════════════════════
-
--- Remove any old instance
-if gui:FindFirstChild("BackstabPro") then
-    gui:FindFirstChild("BackstabPro"):Destroy()
-end
-
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name            = "BackstabPro"
-screenGui.ResetOnSpawn    = false
-screenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
-screenGui.Parent          = gui
-
--- ── Panel ──────────────────────────────────────────────────────────────────
-local panel = Instance.new("Frame")
-panel.Size              = UDim2.new(0, 190, 0, 210)
-panel.Position          = UDim2.new(0, 14, 0, 14)
-panel.BackgroundColor3  = Color3.fromRGB(12, 12, 16)
-panel.BorderSizePixel   = 0
-panel.ClipDescendants   = true
-panel.Parent            = screenGui
-
--- Rounded corners
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 10)
-corner.Parent = panel
-
--- Accent bar on the left
-local accent = Instance.new("Frame")
-accent.Size             = UDim2.new(0, 3, 1, 0)
-accent.Position         = UDim2.new(0, 0, 0, 0)
-accent.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
-accent.BorderSizePixel  = 0
-accent.Parent           = panel
-
--- Title
-local title = Instance.new("TextLabel")
-title.Size              = UDim2.new(1, -10, 0, 32)
-title.Position          = UDim2.new(0, 10, 0, 0)
-title.BackgroundTransparency = 1
-title.TextColor3        = Color3.fromRGB(220, 50, 50)
-title.Font              = Enum.Font.GothamBold
-title.TextSize          = 14
-title.Text              = "BACKSTAB PRO"
-title.TextXAlignment    = Enum.TextXAlignment.Left
-title.Parent            = panel
-
--- Divider
-local div = Instance.new("Frame")
-div.Size                = UDim2.new(1, -10, 0, 1)
-div.Position            = UDim2.new(0, 5, 0, 32)
-div.BackgroundColor3    = Color3.fromRGB(40, 40, 50)
-div.BorderSizePixel     = 0
-div.Parent              = panel
-
--- ── Helper to make a styled button ─────────────────────────────────────────
-local function makeButton(text, posY, color)
-    local btn = Instance.new("TextButton")
-    btn.Size              = UDim2.new(1, -20, 0, 30)
-    btn.Position          = UDim2.new(0, 10, 0, posY)
-    btn.BackgroundColor3  = color or Color3.fromRGB(28, 28, 35)
-    btn.BorderSizePixel   = 0
-    btn.TextColor3        = Color3.fromRGB(230, 230, 230)
-    btn.Font              = Enum.Font.GothamSemibold
-    btn.TextSize          = 13
-    btn.Text              = text
-    btn.AutoButtonColor   = false
-    btn.Parent            = panel
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 6)
-    c.Parent = btn
-
-    -- Hover tween
-    local hoverIn  = TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(45, 45, 58)})
-    local hoverOut = TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundColor3 = color or Color3.fromRGB(28, 28, 35)})
-    btn.MouseEnter:Connect(function() hoverIn:Play() end)
-    btn.MouseLeave:Connect(function() hoverOut:Play() end)
-
-    return btn
-end
-
--- ── Helper to make a labelled TextBox ───────────────────────────────────────
-local function makeInput(labelText, placeholder, defaultVal, posY)
-    local lbl = Instance.new("TextLabel")
-    lbl.Size                = UDim2.new(1, -20, 0, 16)
-    lbl.Position            = UDim2.new(0, 10, 0, posY)
-    lbl.BackgroundTransparency = 1
-    lbl.TextColor3          = Color3.fromRGB(160, 160, 175)
-    lbl.Font                = Enum.Font.Gotham
-    lbl.TextSize            = 11
-    lbl.Text                = labelText
-    lbl.TextXAlignment      = Enum.TextXAlignment.Left
-    lbl.Parent              = panel
-
-    local box = Instance.new("TextBox")
-    box.Size                = UDim2.new(1, -20, 0, 26)
-    box.Position            = UDim2.new(0, 10, 0, posY + 17)
-    box.BackgroundColor3    = Color3.fromRGB(22, 22, 30)
-    box.BorderSizePixel     = 0
-    box.TextColor3          = Color3.fromRGB(230, 230, 230)
-    box.Font                = Enum.Font.Gotham
-    box.TextSize            = 13
-    box.PlaceholderText     = placeholder
-    box.Text                = tostring(defaultVal)
-    box.ClearTextOnFocus    = false
-    box.Parent              = panel
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 5)
-    c.Parent = box
-
-    return box
-end
-
--- ── Widgets ────────────────────────────────────────────────────────────────
-
--- Toggle button (Enable / Disable)
-local toggleBtn = makeButton("▶  ENABLE", 40, Color3.fromRGB(28, 28, 35))
-
--- Mode button
-local modeBtn = makeButton("MODE: BEHIND", 80)
-
--- Range input
-local rangeBox = makeInput("RANGE (1–15)", "studs", CONFIG.range, 118)
-
--- Dot threshold input
-local dotBox = makeInput("BEHIND ANGLE (0–1)", "sensitivity", CONFIG.dotThreshold, 163)
-
--- Status label at bottom
-local statusLbl = Instance.new("TextLabel")
-statusLbl.Size              = UDim2.new(1, -10, 0, 14)
-statusLbl.Position          = UDim2.new(0, 10, 1, -16)
-statusLbl.BackgroundTransparency = 1
-statusLbl.TextColor3        = Color3.fromRGB(100, 100, 115)
-statusLbl.Font              = Enum.Font.Gotham
-statusLbl.TextSize          = 10
-statusLbl.Text              = "idle"
-statusLbl.TextXAlignment    = Enum.TextXAlignment.Left
-statusLbl.Parent            = panel
-
--- ── Logic ──────────────────────────────────────────────────────────────────
-local function setEnabled(val)
-    state.enabled = val
-    if val then
-        toggleBtn.Text             = "◼  DISABLE"
-        toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 35, 35)
-        statusLbl.Text             = "scanning..."
-        statusLbl.TextColor3       = Color3.fromRGB(220, 50, 50)
-    else
-        toggleBtn.Text             = "▶  ENABLE"
-        toggleBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
-        statusLbl.Text             = "idle"
-        statusLbl.TextColor3       = Color3.fromRGB(100, 100, 115)
-    end
-end
-
-toggleBtn.MouseButton1Click:Connect(function()
-    setEnabled(not state.enabled)
-end)
-
-modeBtn.MouseButton1Click:Connect(function()
-    state.mode = (state.mode == "Behind") and "Around" or "Behind"
-    modeBtn.Text = "MODE: " .. state.mode:upper()
-end)
-
-rangeBox.FocusLost:Connect(function()
-    local v = tonumber(rangeBox.Text)
-    if v and v >= CONFIG.minRange and v <= CONFIG.maxRange then
-        CONFIG.range = v
-    else
-        rangeBox.Text = tostring(CONFIG.range)
-    end
-end)
-
-dotBox.FocusLost:Connect(function()
-    local v = tonumber(dotBox.Text)
-    if v and v >= 0 and v <= 1 then
-        CONFIG.dotThreshold = v
-    else
-        dotBox.Text = tostring(CONFIG.dotThreshold)
-    end
-end)
-
--- ── Drag panel ────────────────────────────────────────────────────────────
-do
-    local dragging, dragStart, panelStart
-    title.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-            dragging   = true
-            dragStart  = input.Position
-            panelStart = panel.Position
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-                      or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            panel.Position = UDim2.new(
-                panelStart.X.Scale,
-                panelStart.X.Offset + delta.X,
-                panelStart.Y.Scale,
-                panelStart.Y.Offset + delta.Y
-            )
-        end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end)
-end
-
--- ── Status update ticker ──────────────────────────────────────────────────
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        if state.enabled then
-            local _, hrp = getChar()
-            if hrp then
-                local closest, closestDist = nil, math.huge
-                for _, name in ipairs(CONFIG.killerNames) do
-                    local k = killersFolder:FindFirstChild(name)
-                    if k and k:FindFirstChild("HumanoidRootPart") then
-                        local d = (hrp.Position - k.HumanoidRootPart.Position).Magnitude
-                        if d < closestDist then
-                            closestDist = d
-                            closest = name
+                    if mode == "Behind" then
+                        local directionToTarget = (kHRP.Position - hrp.Position).Unit
+                        local dot = hrp.CFrame.LookVector:Dot(directionToTarget)
+                        if dot > 0.6 then
+                            return
                         end
                     end
+                    local daggerbtn = getDaggerButton()
+                    tryActivateButton(daggerbtn)
                 end
-                if closest and closestDist <= CONFIG.range * 3 then
-                    statusLbl.Text = ("near %s (%.1f)"):format(closest, closestDist)
-                    statusLbl.TextColor3 = closestDist <= CONFIG.range
-                        and Color3.fromRGB(220, 50, 50)
-                        or  Color3.fromRGB(200, 160, 50)
-                else
-                    statusLbl.Text      = "scanning..."
-                    statusLbl.TextColor3 = Color3.fromRGB(100, 100, 115)
-                end
+                return
+            end
+
+            if attackType == "Counter" and not killerPlayingCounterAnim(killer) then
+                continue
+            end
+
+            if isBehindTarget(hrp, kHRP) and killer ~= lastTarget then
+                cooldown = true
+                lastTarget = killer
+
+                local start = tick()
+                local didDagger = false
+                local connection
+
+                connection = RunService.Heartbeat:Connect(function()
+                    if not (char and char.Parent and kHRP and kHRP.Parent) then
+                        if connection then connection:Disconnect() end
+                        return
+                    end
+
+                    local elapsed = tick() - start
+                    if elapsed >= 0.5 then
+                        if connection then connection:Disconnect() end
+                        return
+                    end
+
+                    -- FIX: use helper for both ping and velocity
+                    local pingSeconds = getPingSeconds()
+                    local killerVelocity = getVelocity(kHRP)
+                    local moveDir = killerVelocity.Magnitude > 0.1 and killerVelocity.Unit or Vector3.new()
+                    local pingOffset = moveDir * (pingSeconds * killerVelocity.Magnitude)
+                    local predictedPos = kHRP.Position + pingOffset
+
+                    local targetPos
+                    if mode == "Behind" then
+                        targetPos = predictedPos - (kHRP.CFrame.LookVector * 0.3)
+                    elseif mode == "Around" then
+                        local rightVec = kHRP.CFrame.RightVector
+                        local rel = (hrp.Position - kHRP.Position)
+                        local lateralSpeed = killerVelocity:Dot(rightVec)
+                        local baseOffset = (rel.Magnitude > 0.1) and rel.Unit * 0.3 or Vector3.new()
+                        local lateralOffset = rightVec * lateralSpeed * 0.3
+                        targetPos = predictedPos + baseOffset + lateralOffset
+                    end
+
+                    hrp.CFrame = CFrame.new(targetPos, targetPos + kHRP.CFrame.LookVector)
+
+                    if not didDagger then
+                        didDagger = true
+
+                        local faceStart = tick()
+                        local faceConn
+                        faceConn = RunService.Heartbeat:Connect(function()
+                            if tick() - faceStart >= 0.7 or not kHRP or not kHRP.Parent then
+                                if faceConn then faceConn:Disconnect() end
+                                return
+                            end
+
+                            -- FIX: use helpers here too
+                            local livePingSeconds = getPingSeconds()
+                            local liveVelocity = getVelocity(kHRP)
+                            local liveMoveDir = liveVelocity.Magnitude > 0.1 and liveVelocity.Unit or Vector3.new()
+                            local livePingOffset = liveMoveDir * (livePingSeconds * liveVelocity.Magnitude)
+                            local livePredictedPos = kHRP.Position + livePingOffset
+
+                            local liveTargetPos
+                            if mode == "Behind" then
+                                liveTargetPos = livePredictedPos - (kHRP.CFrame.LookVector * 0.3)
+                            elseif mode == "Around" then
+                                local rightVec = kHRP.CFrame.RightVector
+                                local liveRel = (hrp.Position - kHRP.Position)
+                                local liveLateralSpeed = liveVelocity:Dot(rightVec)
+                                local baseOffset = (liveRel.Magnitude > 0.1) and liveRel.Unit * 0.3 or Vector3.new()
+                                local lateralOffset = rightVec * liveLateralSpeed * 0.3
+                                liveTargetPos = livePredictedPos + baseOffset + lateralOffset
+                            end
+                            hrp.CFrame = CFrame.new(liveTargetPos, liveTargetPos + kHRP.CFrame.LookVector)
+                        end)
+
+                        local daggerbtn = getDaggerButton()
+                        tryActivateButton(daggerbtn)
+                    end
+                end)
+
+                task.delay(2, function()
+                    RunService.Heartbeat:Wait()
+                    while isBehindTarget(hrp, kHRP) do
+                        RunService.Heartbeat:Wait()
+                    end
+                    lastTarget = nil
+                    cooldown = false
+                end)
+
+                break
             end
         end
     end
 end)
-
-print("[BackstabPro] Loaded successfully.")
